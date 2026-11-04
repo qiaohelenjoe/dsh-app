@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 安全漏洞（私下上报）
+    url: https://github.com/qiaohelenjoe/dsh-app/security/advisories/new
+    about: 请不要在公开 issue 中披露安全问题
+  - name: 使用文档
+    url: https://github.com/qiaohelenjoe/dsh-app#readme
+    about: 安装、部署与常见问题

@@ -1,0 +1,63 @@
+name: Bug 报告
+description: 报告一个可复现的问题
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。提交前请先搜索已有 issue，避免重复。
+        安全漏洞请勿在此报告，见 [SECURITY.md](https://github.com/qiaohelenjoe/dsh-app/blob/main/SECURITY.md)。
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 影响范围
+      options:
+        - 服务端 server
+        - 桌面插件 plugin（隧道/面板）
+        - 移动端 mobile（Android 壳）
+        - 窄屏适配 mobile-adapt
+        - 部署 deploy / nginx
+        - 文档
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: App 版本 / 插件版本 / commit（如 1.0.0、plugin 1.0.0、f7df0e3）
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+      description: 请附错误信息/日志（注意去掉令牌、邮箱、服务器地址等敏感信息）
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: 环境
+      placeholder: Windows 11 / Android 14 / 手机型号；DSH 版本
