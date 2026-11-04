@@ -1,0 +1,7 @@
+url: https://github.com/qiaohelenjoe/dsh-app/tree/main/plugin
+name: qiaohelenjoe/dsh-app#plugin
+category: remote
+icon: https://raw.githubusercontent.com/qiaohelenjoe/dsh-app/main/plugin/assets/icon-256.png
+description:
+  en: 'Turns DeepSeek Harness into something your phone can drive: the desktop plugin registers this computer as a device over an outbound tunnel, so the same account on the Android app can list the machine and open its DSH web UI from anywhere, plus a PC panel showing the account, device quota and the latest App download QR code. No inbound ports or port forwarding required.'
+  zh: '让手机能远程使用 DeepSeek Harness：桌面插件通过出站隧道把本机注册成设备，手机 App 用同一账号登录后即可在设备列表里看到这台电脑并打开它的 DSH 界面；PC 端面板展示账号、设备配额与最新 App 下载二维码。不需要公网端口或端口映射，附带 Flutter Android 壳。'

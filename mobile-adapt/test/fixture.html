@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DSH 适配层布局验证样例</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
+    #app { display: flex; height: 100vh; width: 100vw; }
+    aside[data-testid="sidebar"] { width: 240px; flex: 0 0 240px; background: #20242b; color: #fff; padding: 8px; }
+    main[role="main"] { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; }
+    #messages { flex: 1 1 auto; overflow: auto; padding: 12px; }
+    #composer-box { padding: 8px; border-top: 1px solid #ddd; }
+    textarea { width: 100%; height: 48px; }
+    .terminal-panel { position: absolute; right: 0; bottom: 0; width: 320px; height: 200px; background: #111; color: #0f0; padding: 8px; }
+    button { padding: 4px 8px; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <aside data-testid="sidebar">
+      <h3>会话</h3>
+      <ul><li>会话 A</li><li>会话 B</li></ul>
+    </aside>
+    <main role="main">
+      <div id="messages">
+        <p>历史消息 1</p>
+        <p>历史消息 2</p>
+      </div>
+      <div id="composer-box"><textarea placeholder="给 DSH 发消息"></textarea></div>
+    </main>
+    <div class="terminal-panel">终端输出</div>
+  </div>
+  <script type="module" src="/dist/adapt.js"></script>
+</body>
+</html>

@@ -1,0 +1,27 @@
+{
+  "name": "dsh-mobile-adapt",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH Web UI 移动适配层：窄屏重排、抽屉侧栏、吸底输入、触控尺寸、折叠屏动态切换",
+  "dsh": {
+    "client": {
+      "inject": "./dist/adapt.js",
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "node --import tsx --test test/adapt.test.ts",
+    "test:browser": "npm run build && node --import tsx --test test/layout.browser.test.ts"
+  },
+  "devDependencies": {
+    "@types/jsdom": "^21.1.7",
+    "@types/node": "^22.10.2",
+    "jsdom": "^25.0.1",
+    "playwright-core": "^1.48.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

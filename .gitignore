@@ -1,0 +1,25 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+build/
+mobile/build/
+*.tsbuildinfo
+# 公开仓库需要插件的预构建产物，保证 github: 安装可直接加载
+!plugin/dist/
+!plugin/client/
+
+# 环境与本地配置（示例文件保留）
+.env
+.env.*
+!.env.example
+*.local
+.DS_Store
+Thumbs.db
+
+# 本地运维 / 预览残留（不进入仓库）
+.acl-reports/
+.screenshots/
+.tmp-*/
+docs/preview/

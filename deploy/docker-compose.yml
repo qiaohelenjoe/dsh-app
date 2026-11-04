@@ -1,0 +1,74 @@
+name: dsh-account
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dsh
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 未设置（复制 .env.example 为 .env）}
+      POSTGRES_DB: dsh_account
+      TZ: Asia/Shanghai
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dsh -d dsh_account"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - dsh-net
+
+  server:
+    build:
+      context: ../server
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://dsh:${POSTGRES_PASSWORD}@db:5432/dsh_account
+      HOST: 0.0.0.0
+      PORT: 8787
+      MIGRATIONS_DIR: /app/migrations
+      # 手机 App 安装包目录（宿主机 downloads/ 挂载，下载页与文件下载都读它）
+      APK_DIR: /app/apk
+      TZ: Asia/Shanghai
+      ALLOW_TUNNEL_BEARER: "false"
+    volumes:
+      # 生产为 /opt/dsh-account/downloads（与 deploy/ 同级）
+      - ../downloads:/app/apk:ro
+    ports:
+      # 仅本机回环：由宿主机 nginx 终止 TLS 并反代
+      - "127.0.0.1:${SERVER_PORT:-8787}:8787"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          node -e "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - dsh-net
+
+volumes:
+  db-data:
+
+networks:
+  dsh-net:
+    driver: bridge

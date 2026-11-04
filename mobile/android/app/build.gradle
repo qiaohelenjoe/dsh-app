@@ -1,0 +1,66 @@
+plugins {
+    id "com.android.application"
+    id "kotlin-android"
+    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+// 正式包签名：从 android/key.properties 读取你自己的 keystore。
+// key.properties 已在 .gitignore 里，不会进仓库；不填则回退 debug 签名（仅本地调试可用，不能分发）。
+def keystorePropertiesFile = rootProject.file("key.properties")
+def keystoreProperties = new Properties()
+if (keystorePropertiesFile.exists()) {
+    keystorePropertiesFile.withInputStream { stream -> keystoreProperties.load(stream) }
+}
+
+android {
+    namespace = "com.hbzxht.dsh"
+    compileSdk = flutter.compileSdkVersion
+    ndkVersion = flutter.ndkVersion
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = JavaVersion.VERSION_1_8
+    }
+
+    defaultConfig {
+        // 正式发布后不要再改 applicationId，否则等于换了一个新应用。
+        applicationId = "com.hbzxht.dsh"
+        // You can update the following values to match your application needs.
+        // For more information, see: https://flutter.dev/to/review-gradle-config.
+        minSdk = flutter.minSdkVersion
+        targetSdk = flutter.targetSdkVersion
+        versionCode = flutter.versionCode
+        versionName = flutter.versionName
+    }
+
+    signingConfigs {
+        if (keystorePropertiesFile.exists()) {
+            release {
+                storeFile file(keystoreProperties["storeFile"])
+                storePassword keystoreProperties["storePassword"]
+                keyAlias keystoreProperties["keyAlias"]
+                keyPassword keystoreProperties["keyPassword"]
+                // 可选：JKS 或 PKCS12；不写时由 Gradle 按 Java 默认类型识别（Java 9+ 默认 PKCS12）
+                if (keystoreProperties["storeType"]) {
+                    storeType = keystoreProperties["storeType"]
+                }
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            // 有 key.properties 用你的正式签名；没有就回退 debug，保证本地能构建。
+            signingConfig = keystorePropertiesFile.exists() ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+}
+
+flutter {
+    source = "../.."
+}

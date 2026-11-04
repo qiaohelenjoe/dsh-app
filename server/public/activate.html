@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>激活 DSH 桌面端</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; max-width: 420px; margin: 48px auto; padding: 0 16px; line-height: 1.6; }
+    h1 { font-size: 20px; }
+    label { display: block; margin-top: 12px; font-size: 14px; }
+    input { width: 100%; padding: 8px; font-size: 16px; box-sizing: border-box; }
+    button { margin-top: 16px; padding: 10px 16px; font-size: 15px; cursor: pointer; }
+    button.deny { margin-left: 8px; }
+    #status { margin-top: 16px; white-space: pre-wrap; font-size: 14px; }
+    .hint { font-size: 13px; opacity: 0.75; }
+  </style>
+</head>
+<body>
+  <h1>激活 DSH 桌面端</h1>
+  <p class="hint">先登录你的账号，再输入桌面端显示的用户码（形如 ABCD-1234），确认后即可授权该电脑连接。</p>
+
+  <label>邮箱<input id="email" type="email" autocomplete="username" /></label>
+  <label>密码<input id="password" type="password" autocomplete="current-password" /></label>
+  <button id="login">登录</button>
+
+  <label>用户码<input id="userCode" placeholder="ABCD-1234" autocomplete="one-time-code" /></label>
+  <button id="approve">批准授权</button>
+  <button id="deny" class="deny">拒绝</button>
+
+  <div id="status"></div>
+
+  <script>
+    let accessToken = null;
+    const statusEl = document.getElementById('status');
+    const setStatus = (text) => { statusEl.textContent = text; };
+    const json = (path, body, token) =>
+      fetch(path, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...(token ? { authorization: 'Bearer ' + token } : {}),
+        },
+        body: JSON.stringify(body),
+      }).then(async (response) => ({ ok: response.ok, status: response.status, body: await response.json().catch(() => ({})) }));
+
+    document.getElementById('login').addEventListener('click', async () => {
+      setStatus('登录中…');
+      const result = await json('/v1/auth/login', {
+        email: document.getElementById('email').value,
+        password: document.getElementById('password').value,
+        clientType: 'mobile',
+        device: {
+          name: '浏览器授权页',
+          platform: 'win32',
+          signPublicKey: 'browser-activate',
+          ecdhPublicKey: 'browser-activate',
+        },
+      });
+      if (!result.ok) {
+        setStatus('登录失败：' + (result.body?.error?.message || result.status));
+        return;
+      }
+      accessToken = result.body.accessToken;
+      setStatus('已登录：' + (result.body.account?.email || ''));
+    });
+
+    async function decide(decision) {
+      if (!accessToken) { setStatus('请先登录'); return; }
+      setStatus(decision === 'approve' ? '正在批准…' : '正在拒绝…');
+      const result = await json('/v1/auth/device-code/approve', {
+        userCode: document.getElementById('userCode').value,
+        decision,
+      }, accessToken);
+      setStatus(result.ok ? (result.body.status === 'approved' ? '✅ 已批准，请回到桌面端' : '已拒绝') : '操作失败：' + (result.body?.error?.message || result.status));
+    }
+    document.getElementById('approve').addEventListener('click', () => decide('approve'));
+    document.getElementById('deny').addEventListener('click', () => decide('deny'));
+  </script>
+</body>
+</html>

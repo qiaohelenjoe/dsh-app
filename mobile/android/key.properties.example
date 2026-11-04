@@ -1,0 +1,11 @@
+# 正式包签名配置：复制本文件为 key.properties 并填写（key.properties 已被 .gitignore 忽略，不会进仓库）
+#
+# storeFile 用绝对路径；Windows 路径里的反斜杠要写两个，例如 C:\\keys\\dsh-release.jks
+# 生成 keystore（只需一次，生成后离线备份，丢了就无法发布更新）：
+#   keytool -genkeypair -v -keystore dsh-release.jks -alias dsh -keyalg RSA -keysize 2048 -validity 36500
+storePassword=你的keystore密码
+keyPassword=你的key密码
+keyAlias=dsh
+storeFile=C:\\path\\to\\dsh-release.jks
+# 可选：keystore 类型（JKS 或 PKCS12）。不填时由 Gradle 按 Java 默认类型识别（Java 9+ 为 PKCS12）
+# storeType=PKCS12
