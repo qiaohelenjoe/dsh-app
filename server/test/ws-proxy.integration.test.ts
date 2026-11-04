@@ -154,10 +154,8 @@ class FakeTunnel {
   private async openChannel(frame: Frame): Promise<void> {
     const id = frame['id'] as string;
     const path = frame['path'] as string;
-    console.log('[test] wsopen ->', id, path, 'upstreamPort=', this.upstream.port);
     const channel = new WebSocket(`ws://127.0.0.1:${this.upstream.port}${path}`);
     channel.on('open', () => {
-      console.log('[test] upstream connected', id);
       this.channels.set(id, channel);
       this.send({ t: 'wsopen', id, ok: true });
     });
@@ -313,7 +311,6 @@ describe('隧道 WebSocket 代理（T06）', () => {
     try {
       const client = connectClient(ctx, '/api/remote.mux?x=1');
       await client.opened;
-      console.log('[test] client opened: upstream connections=', ctx.upstream.connections.length, 'tunnel channels=', ctx.tunnel.channels.size);
       await waitUntil(() => ctx.upstream.connections.length === 1);
       assert.equal(ctx.upstream.last?.path, '/api/remote.mux?x=1');
       client.socket.close(1000, 'done');
