@@ -12,11 +12,15 @@ Backed by a small account service (email/password login, devices, tunnel tickets
 ## Install
 
 ```sh
+# npm (recommended)
+dsh plugin --profile web add dsh-mobile-tunnel
+
+# or straight from GitHub
 dsh plugin --profile web add github:qiaohelenjoe/dsh-app#path:/plugin
 ```
 
-Prebuilt `dist/` and `client/` are committed, so the GitHub install works without a build step.
-
+- npm: [dsh-mobile-tunnel](https://www.npmjs.com/package/dsh-mobile-tunnel) — published package, `dist/` and `client/` are built by `prepublishOnly`, no build step on install.
+- GitHub: prebuilt `dist/` and `client/` are committed to the repository, so this path works without a build step either.
 - On the desktop profile (managed by Electron), install through the DSH settings page instead of `dsh plugin --profile desktop`.
 
 ## Screenshots
