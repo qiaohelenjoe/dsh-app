@@ -30,6 +30,7 @@ class UpstreamServer {
 
   constructor() {
     this.wss = new WebSocketServer({ port: 0 });
+    this.wss.on('error', (error) => console.error('[test] upstream server error:', error.message));
     this.wss.on('connection', (socket, request) => {
       const record = { path: request.url ?? '', socket, closeCode: null as number | null, messages: [] as string[] };
       this.connections.push(record);
@@ -170,7 +171,9 @@ class FakeTunnel {
       this.channels.delete(id);
       this.send({ t: 'wsclose', id, code, reason: reason.toString() });
     });
-    channel.on('error', () => {
+    channel.on('error', (error) => {
+      // CI 上曾出现 UpstreamServer 连不上导致整组超时，留下原因便于定位
+      console.error('[test] upstream ws error:', (error as Error).message);
       this.send({ t: 'wsopen', id, ok: false, status: 502, reason: 'upstream error' });
     });
   }
