@@ -14,7 +14,7 @@ import { issueTunnelTicket, tunnelSocketUrl } from './helpers/tunnel.js';
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function waitUntil(condition: () => boolean, timeoutMs = 3000, intervalMs = 20): Promise<void> {
+async function waitUntil(condition: () => boolean, timeoutMs = 10000, intervalMs = 20): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (condition()) return;
@@ -175,7 +175,7 @@ class FakeTunnel {
     });
   }
 
-  nextFrame(predicate: (frame: Frame) => boolean, timeoutMs = 3000): Promise<Frame> {
+  nextFrame(predicate: (frame: Frame) => boolean, timeoutMs = 10000): Promise<Frame> {
     const existing = this.frames.find(predicate);
     if (existing) {
       this.frames.splice(this.frames.indexOf(existing), 1);

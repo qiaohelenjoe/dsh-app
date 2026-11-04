@@ -55,7 +55,12 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: plugin/package-lock.json
+          # 插件 typecheck 会检查 ../server 的集成测试依赖，两个 lockfile 都要进缓存
+          cache-dependency-path: |
+            server/package-lock.json
+            plugin/package-lock.json
+      - run: npm ci
+        working-directory: server
       - run: npm ci
         working-directory: plugin
       - run: npm run typecheck

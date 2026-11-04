@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readdirSync } from 'node:fs';
 import { describe, test } from 'node:test';
 import { buildApp } from '../src/app.js';
 import { defaultMigrationsDir, runMigrations } from '../src/db/migrate.js';
@@ -7,6 +8,11 @@ import { createTempDatabase } from './helpers/db.js';
 import { makeTestAuthConfig } from './helpers/auth.js';
 
 const MIGRATIONS_DIR = defaultMigrationsDir();
+const LATEST_SCHEMA_VERSION = readdirSync(MIGRATIONS_DIR)
+  .filter((f) => f.endsWith('.sql'))
+  .map((f) => f.slice(0, 4))
+  .sort()
+  .at(-1);
 
 interface HealthBody {
   status: string;
@@ -28,7 +34,7 @@ describe('/healthz（T01）', () => {
         const body = response.json<HealthBody>();
         assert.equal(body.status, 'ok');
         assert.equal(body.db, 'up');
-        assert.equal(body.schemaVersion, '0003');
+        assert.equal(body.schemaVersion, LATEST_SCHEMA_VERSION);
       } finally {
         await app.close();
       }

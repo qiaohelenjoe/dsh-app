@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, test } from 'node:test';
@@ -13,6 +14,10 @@ import {
 import { createTempDatabase, type TempDatabase } from './helpers/db.js';
 
 const MIGRATIONS_DIR = defaultMigrationsDir();
+const MIGRATION_VERSIONS = readdirSync(MIGRATIONS_DIR)
+  .filter((f) => f.endsWith('.sql'))
+  .map((f) => f.slice(0, 4))
+  .sort();
 
 async function withDatabase(run: (pool: pg.Pool, db: TempDatabase) => Promise<void>): Promise<void> {
   const db = await createTempDatabase();
@@ -29,7 +34,7 @@ describe('数据层与迁移（T01）', () => {
   test('空库迁移后得到全部表、视图与清理函数', async () => {
     await withDatabase(async (pool) => {
       const result = await runMigrations(pool, MIGRATIONS_DIR);
-      assert.deepEqual(result.applied, ['0001', '0002', '0003']);
+      assert.deepEqual(result.applied, MIGRATION_VERSIONS);
 
       const tables = await pool.query<{ table_name: string }>(
         `SELECT table_name FROM information_schema.tables
@@ -54,14 +59,14 @@ describe('数据层与迁移（T01）', () => {
       const first = await runMigrations(pool, MIGRATIONS_DIR);
       const second = await runMigrations(pool, MIGRATIONS_DIR);
 
-      assert.deepEqual(first.applied, ['0001', '0002', '0003']);
+      assert.deepEqual(first.applied, MIGRATION_VERSIONS);
       assert.deepEqual(second.applied, []);
-      assert.deepEqual(second.skipped, ['0001', '0002', '0003']);
+      assert.deepEqual(second.skipped, MIGRATION_VERSIONS);
 
       const tracked = await pool.query<{ version: string }>('SELECT version FROM schema_migrations');
       assert.deepEqual(
         tracked.rows.map((row) => row.version),
-        ['0001', '0002', '0003'],
+        MIGRATION_VERSIONS,
       );
     });
   });
@@ -187,7 +192,7 @@ describe('数据层与迁移（T01）', () => {
     await withDatabase(async (pool) => {
       const behind = await readSchemaState(pool, MIGRATIONS_DIR);
       assert.equal(behind.ok, false);
-      assert.deepEqual(behind.missing, ['0001', '0002', '0003']);
+      assert.deepEqual(behind.missing, MIGRATION_VERSIONS);
 
       await assert.rejects(
         () => assertSchemaVersion(pool, MIGRATIONS_DIR),
