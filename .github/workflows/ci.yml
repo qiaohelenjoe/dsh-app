@@ -41,7 +41,9 @@ jobs:
         working-directory: server
       - run: npm run typecheck
         working-directory: server
-      - run: npm run test
+      # 集成测试会起真实 WS/HTTP 服务，2 核 runner 上并行 15 个文件容易互相拖慢，
+      # 导致隧道握手等待超时；这里串行执行，单个用例超时放宽到 60s。
+      - run: node --import tsx --test --test-concurrency=1 --test-timeout=60000 test/*.test.ts
         working-directory: server
         env:
           TEST_DATABASE_ADMIN_URL: postgres://postgres:postgres@127.0.0.1:55432/postgres

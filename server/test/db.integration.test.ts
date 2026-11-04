@@ -202,7 +202,7 @@ describe('数据层与迁移（T01）', () => {
       await runMigrations(pool, MIGRATIONS_DIR);
       const state = await assertSchemaVersion(pool, MIGRATIONS_DIR);
       assert.equal(state.ok, true);
-      assert.equal(state.currentVersion, '0003');
+      assert.equal(state.currentVersion, MIGRATION_VERSIONS.at(-1));
     });
   });
 });
