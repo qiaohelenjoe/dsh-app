@@ -1,5 +1,9 @@
+import { appendFileSync, readdirSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { getHostService } from './host.js';
 import { isPanelSession } from './panel-session.js';
+import { FS_FILE_ROUTE, FS_LIST_ROUTE, FS_ROOTS_ROUTE, handleFsFile, handleFsList, handleFsRoots, } from './fs-routes.js';
 /**
  * 把面板会话暴露给浏览器侧插件（同源 JSON 接口）。
  *
@@ -8,6 +12,105 @@ import { isPanelSession } from './panel-session.js';
  * 注册会安静放弃，浏览器侧自动回落 sessionStorage（行为与改动前一致）。
  */
 export const PANEL_SESSION_ROUTE = '/plugins/dsh-mobile-tunnel/panel-session';
+/**
+ * 移动端文件面板需要的会话上下文（只读）。
+ *
+ * 文件树/预览走 `remote.workspaceFiles.<method>(sessionId, path)`，而 sessionId 只有
+ * 官方 sidebar tab 组件内部才持有。这里从 `~/.dsh/sessions/<workspace>/session-<id>/`
+ * 里取**最近活跃**的会话，供我们自己的面板使用；不改任何数据。
+ */
+export const WORKSPACE_ROUTE = '/plugins/dsh-mobile-tunnel/workspace';
+/** 客户端自报诊断日志：写本机文件，供排查用（只追加文本，不接受任意路径）。 */
+export const DIAG_ROUTE = '/plugins/dsh-mobile-tunnel/diag';
+export const DIAG_LOG = join(homedir(), '.dsh', 'dsh-mobile-tunnel-diag.log');
+async function handleDiag(req, res) {
+    if (req.method !== 'POST') {
+        let text = '';
+        try {
+            const { readFileSync } = await import('node:fs');
+            text = readFileSync(DIAG_LOG, 'utf8').slice(-4000);
+        }
+        catch {
+            text = '';
+        }
+        sendJson(res, 200, { log: DIAG_LOG, text });
+        return;
+    }
+    let body = '';
+    for await (const chunk of req) {
+        body += String(chunk);
+        if (body.length > 32 * 1024)
+            break;
+    }
+    try {
+        appendFileSync(DIAG_LOG, `${new Date().toISOString()} ${body.slice(0, 4000)}\n`, 'utf8');
+        sendJson(res, 200, { ok: true });
+    }
+    catch (error) {
+        sendJson(res, 500, { error: String(error.message) });
+    }
+}
+function latestWorkspaceContext() {
+    const root = join(homedir(), '.dsh', 'sessions');
+    let best = null;
+    let workspaces;
+    try {
+        workspaces = readdirSync(root, { withFileTypes: true })
+            .filter((entry) => entry.isDirectory())
+            .map((entry) => entry.name);
+    }
+    catch {
+        return null;
+    }
+    for (const workspaceDir of workspaces) {
+        let sessions;
+        try {
+            sessions = readdirSync(join(root, workspaceDir), { withFileTypes: true })
+                .filter((entry) => entry.isDirectory() && entry.name.startsWith('session-'))
+                .map((entry) => entry.name);
+        }
+        catch {
+            continue;
+        }
+        for (const dir of sessions) {
+            const file = join(root, workspaceDir, dir, 'session.v4.jsonl.zstd');
+            try {
+                const info = statSync(file);
+                if (!best || info.mtimeMs > best.updatedAt) {
+                    best = {
+                        sessionId: dir.slice('session-'.length),
+                        workspaceDir,
+                        updatedAt: info.mtimeMs,
+                    };
+                }
+            }
+            catch {
+                // 会话还没落盘，跳过
+            }
+        }
+    }
+    return best;
+}
+async function handleWorkspace(req, res) {
+    if (!sameOrigin(req)) {
+        sendJson(res, 403, { error: 'origin-rejected' });
+        return;
+    }
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+        sendJson(res, 405, { error: 'method-not-allowed' });
+        return;
+    }
+    const context = latestWorkspaceContext();
+    if (!context) {
+        sendJson(res, 404, { error: 'no-session' });
+        return;
+    }
+    sendJson(res, 200, {
+        sessionId: context.sessionId,
+        workspaceDir: context.workspaceDir,
+        updatedAt: context.updatedAt,
+    });
+}
 const MAX_BODY_BYTES = 64 * 1024;
 const RETRY_INTERVAL_MS = 500;
 const MAX_RETRIES = 120;
@@ -102,6 +205,7 @@ export function registerPanelSessionRoutes(ctx, store, publicConfig, log) {
         if (typeof webServer?.register !== 'function')
             return false;
         try {
+            const disposers = [];
             const registered = webServer.register({
                 kind: 'exact',
                 path: PANEL_SESSION_ROUTE,
@@ -109,8 +213,64 @@ export function registerPanelSessionRoutes(ctx, store, publicConfig, log) {
                     void handle(req, res, store, publicConfig, log);
                 },
             });
-            release = typeof registered === 'function' ? () => registered() : () => undefined;
-            log(`[dsh-mobile-tunnel] 面板会话接口已注册：${PANEL_SESSION_ROUTE}`);
+            if (typeof registered === 'function')
+                disposers.push(registered);
+            const workspaceRegistered = webServer.register({
+                kind: 'exact',
+                path: WORKSPACE_ROUTE,
+                handler: (req, res) => {
+                    void handleWorkspace(req, res);
+                },
+            });
+            if (typeof workspaceRegistered === 'function')
+                disposers.push(workspaceRegistered);
+            const diagRegistered = webServer.register({
+                kind: 'exact',
+                path: DIAG_ROUTE,
+                handler: (req, res) => {
+                    void handleDiag(req, res);
+                },
+            });
+            if (typeof diagRegistered === 'function')
+                disposers.push(diagRegistered);
+            const fsRoots = webServer.register({
+                kind: 'exact',
+                path: FS_ROOTS_ROUTE,
+                handler: (req, res) => {
+                    void handleFsRoots(req, res);
+                },
+            });
+            if (typeof fsRoots === 'function')
+                disposers.push(fsRoots);
+            const fsList = webServer.register({
+                kind: 'exact',
+                path: FS_LIST_ROUTE,
+                handler: (req, res) => {
+                    void handleFsList(req, res);
+                },
+            });
+            if (typeof fsList === 'function')
+                disposers.push(fsList);
+            const fsFile = webServer.register({
+                kind: 'exact',
+                path: FS_FILE_ROUTE,
+                handler: (req, res) => {
+                    void handleFsFile(req, res);
+                },
+            });
+            if (typeof fsFile === 'function')
+                disposers.push(fsFile);
+            release = () => {
+                for (const dispose of disposers) {
+                    try {
+                        dispose();
+                    }
+                    catch {
+                        // 忽略
+                    }
+                }
+            };
+            log(`[dsh-mobile-tunnel] 面板接口已注册：${PANEL_SESSION_ROUTE} / ${WORKSPACE_ROUTE}`);
         }
         catch (error) {
             log(`[dsh-mobile-tunnel] 面板会话接口注册失败：${error.message}`);

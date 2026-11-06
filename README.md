@@ -135,12 +135,11 @@ npm run test:browser
 
 ## 已知限制
 
-- **手机端右侧面板 → 工作区 → 文件预览报「文件资源服务不可用」**。
-  会话内文件（消息附件、文件卡片）走 HTTP `/api/file`，**正常**。
-  右侧面板走 DSH 客户端资源模型（`ctx.resources` 的 `file` provider）：手机端运行时里
-  `useResource` 返回 `none`，而 `resources.register` 又报告 protocol `file` 已有提供方，
-  属于 DSH 前端内部状态不一致，代理层无法修复。
-  排查记录见 [`docs/桌面端启动失败排查-20261104.md`](docs/桌面端启动失败排查-20261104.md)。
+- ~~手机端右侧面板文件预览报「文件资源服务不可用」~~ **已于 1.1.0 解决**。
+  右侧面板的「工作区文件」入口改由插件自己的文件面板接管（树形浏览、多页签、
+  Markdown / 代码 / 图片预览），不再依赖 DSH 客户端资源模型的 `file` provider；
+  会话内文件卡片与附件仍走 HTTP `/api/file`，行为不变。
+  实现与约束见 [`plugin/README.md`](plugin/README.md) 的「文件面板」。
 - DSH 桌面端每次启动都会新增一条 `dsh-auth-*` cookie（host 端口随机导致 cookie 名不同）。
   插件会在启动时尝试清理；若 Chromium 已独占 cookie 库则跳过，可用
   [`deploy/clean-dsh-auth-cookies.mjs`](deploy/clean-dsh-auth-cookies.mjs) 手动兜底。
@@ -157,7 +156,8 @@ npm run test:browser
 | iOS | 通过 Xcode 构建并走 TestFlight 内测，随后提交 App Store |
 | Android | 跟随 DSH 版本持续迭代，官网下载页与国内应用商店同步更新 |
 
-PC 端插件（`dsh-mobile-tunnel`）按功能迭代独立发版，与移动端版本号解耦。
+PC 端插件（`dsh-mobile-tunnel`）按功能迭代独立发版，与移动端版本号解耦：
+当前 `latest` 为 **1.1.0**（新增移动端文件面板；入口沿用右侧面板的「工作区文件」）。
 
 ## 运维脚本
 
