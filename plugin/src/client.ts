@@ -11,6 +11,7 @@
  */
 
 import { APP_DOWNLOAD_URL, APP_QR_SVG } from './app-qr.js';
+import { filePanelEnabled, mountFilePanel } from './file-panel.js';
 
 const pluginName = 'dsh-mobile-account-ui';
 const pluginInject: string[] = [];
@@ -884,6 +885,8 @@ function apply(ctx?: ClientContext): () => void {
   const disposeFileProvider = mountFileProvider(ctx);
   installStyle();
   if (document.getElementById(NAV_ENTRY_ID)) return disposeFileProvider;
+  // 移动端：用自己的文件面板替换官方「工作区文件」入口（官方预览依赖缺失的 resources 服务）。
+  const filePanel = filePanelEnabled() ? mountFilePanel() : null;
 
   console.log('[mobile-menu] mobile=' + isMobileApp() + ' flag=' + document.documentElement?.getAttribute('data-dsh-mobile-app') + ' ua=' + navigator.userAgent.slice(0, 70));
 
@@ -969,6 +972,7 @@ function apply(ctx?: ClientContext): () => void {
     closeMorePanel();
     panel.close();
     document.getElementById('dsh-mobile-account-style')?.remove();
+    filePanel?.dispose();
     disposeFileProvider();
   };
 }

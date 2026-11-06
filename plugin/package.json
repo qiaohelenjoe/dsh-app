@@ -1,6 +1,6 @@
 {
   "name": "dsh-mobile-tunnel",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
   "description": "DSH 桌面端插件：账号登录、出站隧道、PC 端账号面板与手机 App 下载入口",
   "author": "乔晟",

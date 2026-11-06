@@ -15,7 +15,7 @@ const outPath = join(outDir, 'client.js');
 let code = readFileSync(rawPath, 'utf8');
 // 客户端 bundle 是单文件格式（factory 里没有模块解析器）：把生成出来的辅助模块内联进来，
 // 并去掉对应的 import 语句。
-for (const name of ['app-qr']) {
+for (const name of ['app-qr', 'file-panel']) {
   const modulePath = join(rawDir, `${name}.js`);
   if (!existsSync(modulePath)) continue;
   const helper = readFileSync(modulePath, 'utf8')
@@ -29,6 +29,8 @@ for (const name of ['app-qr']) {
   code = `${helper}\n${code}`;
 }
 code = code.replace(/^\/\/# sourceMappingURL=.*$/m, '');
+const pkgVersion = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
+code = code.replaceAll('__PKG_VERSION__', pkgVersion);
 code = code.replace(/^export\s+const\s+/gm, 'const ');
 code = code.replace(/^export\s+let\s+/gm, 'let ');
 code = code.replace(/^export\s+function\s+/gm, 'function ');

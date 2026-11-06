@@ -1,4 +1,4 @@
-﻿{
+{
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": false,
@@ -7,5 +7,5 @@
     "sourceMap": true
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["src/client.ts"]
+  "exclude": ["src/client.ts", "src/file-panel.ts"]
 }
