@@ -27,7 +27,7 @@
 | 目录 | 内容 |
 |---|---|
 | `server/` | 中继服务：账号 / 设备 / 会话 / 隧道 / HTTP+WS 代理 |
-| `plugin/` | 桌面插件 `dsh-mobile-tunnel`：出站隧道、Cookie、账号面板、客户端移动端增强 |
+| `dsh-mobile-tunnel/` | 桌面插件 `dsh-mobile-tunnel`：出站隧道、Cookie、账号面板、客户端移动端增强 |
 | `mobile/` | Flutter 移动壳：登录、设备列表、WebView、安全存储 |
 | `mobile-adapt/` | 浏览器注入的窄屏适配层 |
 | `deploy/` | Docker Compose、nginx、备份与运维脚本 |
@@ -66,11 +66,11 @@ npm run dev                   # http://127.0.0.1:8787
 ### 3. 桌面插件
 
 ```bash
-cd plugin
+cd dsh-mobile-tunnel
 npm install && npm run build
 ```
 
-在 DSH 的 profile 里以本地路径安装插件（`file:` 依赖），详见 [`plugin/README.md`](plugin/README.md)。
+在 DSH 的 profile 里以本地路径安装插件（`file:` 依赖），详见 [`dsh-mobile-tunnel/README.md`](dsh-mobile-tunnel/README.md)。
 
 > desktop profile 由 Electron 管理，`dsh plugin --profile desktop ...` 会被拒绝；请通过 DSH 设置页或 profile 的 `package.json` 管理。
 
@@ -113,9 +113,9 @@ npm run test:browser
 | 包 | 命令 | 前置 / 说明 |
 |---|---|---|
 | `server` | `npm test` | 需要本地 Postgres（`127.0.0.1:55432`），测试自建临时库并清理 |
-| `plugin` | `npm test` | 同样需要 Postgres（集成测试起真实服务端 + 模拟本机 DSH） |
-| `plugin` | `npm run test:unit` | 只跑不依赖数据库的单元测试（面板会话、分片协议） |
-| `plugin` | `npm run check:client` | jsdom 客户端 UI 检查（侧栏入口/移动端策略/已登录+二维码） |
+| `dsh-mobile-tunnel` | `npm test` | 同样需要 Postgres（集成测试起真实服务端 + 模拟本机 DSH） |
+| `dsh-mobile-tunnel` | `npm run test:unit` | 只跑不依赖数据库的单元测试（面板会话、分片协议） |
+| `dsh-mobile-tunnel` | `npm run check:client` | jsdom 客户端 UI 检查（侧栏入口/移动端策略/已登录+二维码） |
 | `mobile` | `flutter test` / `flutter analyze` | 需要 Flutter SDK |
 | `mobile-adapt` | `npm test` / `npm run test:browser` | 浏览器布局测试需要本机 Edge/Chrome |
 
@@ -123,15 +123,15 @@ npm run test:browser
 
 | 登录 | 我的设备 | 远程打开 DSH |
 |---|---|---|
-| ![登录](plugin/assets/screenshots/01-login.jpg) | ![设备列表](plugin/assets/screenshots/02-devices.jpg) | ![DSH 页面](plugin/assets/screenshots/03-device-detail-01.jpg) |
+| ![登录](dsh-mobile-tunnel/assets/screenshots/01-login.jpg) | ![设备列表](dsh-mobile-tunnel/assets/screenshots/02-devices.jpg) | ![DSH 页面](dsh-mobile-tunnel/assets/screenshots/03-device-detail-01.jpg) |
 
 | 侧栏与工作区 | 设置 | PC 端「移动端」面板 |
 |---|---|---|
-| ![侧栏](plugin/assets/screenshots/03-device-detail-02.jpg) | ![设置](plugin/assets/screenshots/04-settings.jpg) | ![账号面板](plugin/assets/screenshots/05-panel.png) |
+| ![侧栏](dsh-mobile-tunnel/assets/screenshots/03-device-detail-02.jpg) | ![设置](dsh-mobile-tunnel/assets/screenshots/04-settings.jpg) | ![账号面板](dsh-mobile-tunnel/assets/screenshots/05-panel.png) |
 
 | 对话与产出 |
 |---|
-| ![对话](plugin/assets/screenshots/03-device-detail-03.jpg) |
+| ![对话](dsh-mobile-tunnel/assets/screenshots/03-device-detail-03.jpg) |
 
 ## 已知限制
 
@@ -139,11 +139,11 @@ npm run test:browser
   右侧面板的「工作区文件」入口改由插件自己的文件面板接管（树形浏览、多页签、
   Markdown / 代码 / 图片预览），不再依赖 DSH 客户端资源模型的 `file` provider；
   会话内文件卡片与附件仍走 HTTP `/api/file`，行为不变。
-  实现与约束见 [`plugin/README.md`](plugin/README.md) 的「文件面板」。
+  实现与约束见 [`dsh-mobile-tunnel/README.md`](dsh-mobile-tunnel/README.md) 的「文件面板」。
 - DSH 桌面端每次启动都会新增一条 `dsh-auth-*` cookie（host 端口随机导致 cookie 名不同）。
   插件会在启动时尝试清理；若 Chromium 已独占 cookie 库则跳过，可用
   [`deploy/clean-dsh-auth-cookies.mjs`](deploy/clean-dsh-auth-cookies.mjs) 手动兜底。
-- 桌面插件设置页卡片依赖 DSH 未公开 UI API；未挂载时用 `plugin/scripts/login.mjs` 兜底。
+- 桌面插件设置页卡片依赖 DSH 未公开 UI API；未挂载时用 `dsh-mobile-tunnel/scripts/login.mjs` 兜底。
 - 隧道票据为单实例内存实现，多实例需改共享存储。
 
 ## 版本规划
@@ -170,7 +170,7 @@ PC 端插件（`dsh-mobile-tunnel`）按功能迭代独立发版，与移动端�
 ## 文档
 
 - [API 契约](docs/api.md) · [数据库结构](docs/schema.sql) · [总体方案](docs/方案.md)
-- [部署](deploy/README.md) · [插件](plugin/README.md) · [服务端](server/README.md)
+- [部署](deploy/README.md) · [插件](dsh-mobile-tunnel/README.md) · [服务端](server/README.md)
 
 > 内部规格与实施记录（`.spec-workflow/`）不随公开仓库发布。
 

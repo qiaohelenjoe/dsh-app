@@ -1,4 +1,4 @@
-# Add dsh-mobile-tunnel (qiaohelenjoe/dsh-app — `plugin/`)
+# Add dsh-mobile-tunnel (qiaohelenjoe/dsh-app — `dsh-mobile-tunnel/`)
 
 ## What it is
 
@@ -16,7 +16,7 @@ Backed by a small account service (email/password login, devices, tunnel tickets
 dsh plugin --profile web add dsh-mobile-tunnel
 
 # or straight from GitHub
-dsh plugin --profile web add github:qiaohelenjoe/dsh-app#path:/plugin
+dsh plugin --profile web add github:qiaohelenjoe/dsh-app#path:/dsh-mobile-tunnel
 ```
 
 - npm: [dsh-mobile-tunnel](https://www.npmjs.com/package/dsh-mobile-tunnel) — published package, `dist/` and `client/` are built by `prepublishOnly`, no build step on install.
@@ -27,11 +27,11 @@ dsh plugin --profile web add github:qiaohelenjoe/dsh-app#path:/plugin
 
 | Mobile | |
 |---|---|
-| ![login](https://raw.githubusercontent.com/qiaohelenjoe/dsh-app/main/plugin/assets/screenshots/01-login.jpg) | ![devices](https://raw.githubusercontent.com/qiaohelenjoe/dsh-app/main/plugin/assets/screenshots/02-devices.jpg) |
+| ![login](https://raw.githubusercontent.com/qiaohelenjoe/dsh-app/main/dsh-mobile-tunnel/assets/screenshots/01-login.jpg) | ![devices](https://raw.githubusercontent.com/qiaohelenjoe/dsh-app/main/dsh-mobile-tunnel/assets/screenshots/02-devices.jpg) |
 
 | Device page | Panel |
 |---|---|
-| ![device](https://raw.githubusercontent.com/qiaohelenjoe/dsh-app/main/plugin/assets/screenshots/03-device-detail-02.jpg) | ![panel](https://raw.githubusercontent.com/qiaohelenjoe/dsh-app/main/plugin/assets/screenshots/05-panel.png) |
+| ![device](https://raw.githubusercontent.com/qiaohelenjoe/dsh-app/main/dsh-mobile-tunnel/assets/screenshots/03-device-detail-02.jpg) | ![panel](https://raw.githubusercontent.com/qiaohelenjoe/dsh-app/main/dsh-mobile-tunnel/assets/screenshots/05-panel.png) |
 
 ## Notes
 

@@ -119,12 +119,12 @@ curl.exe -s -X POST http://127.0.0.1:8787/v1/auth/register -H 'content-type: app
 - 重写：HTML/CSS 的根绝对路径加 `/t/<id>` 前缀；`Location` 同理；`Set-Cookie` 的 `Path` 改为 `/t/<id>`；`Content-Length` 按实际 body 重新生成
 - 安全：原始 URL 上做两层解码的 `..`/反斜杠/NUL 检查（400），路径白名单由隧道层执行
 - `/t/<id>`（无尾斜杠）302 到 `/t/<id>/`
-## 桌面插件（T08，`plugin/`）
+## 桌面插件（T08，`dsh-mobile-tunnel/`）
 
 DSH Cordis 插件 `dsh-mobile-tunnel`：设备码登录 → 注册设备 → 出站 WSS 隧道 → 把 `/t/<id>/*` 请求转发到本机 DSH。
 
 ```powershell
-cd plugin
+cd dsh-mobile-tunnel
 npm install
 npm run typecheck
 npm test          # 6 条端到端测试（真实服务端 + 模拟本机 DSH）

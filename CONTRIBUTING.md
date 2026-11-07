@@ -21,7 +21,7 @@ npm run typecheck && npm run test
 npm run migrate && npm run dev
 
 # 桌面插件（单元测试与客户端 UI 检查不依赖数据库）
-cd plugin && npm install
+cd dsh-mobile-tunnel && npm install
 npm run typecheck && npm run test:unit && npm run check:client && npm run build
 
 # 移动端

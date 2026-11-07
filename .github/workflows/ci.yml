@@ -52,8 +52,8 @@ jobs:
         env:
           TEST_DATABASE_ADMIN_URL: postgres://postgres:postgres@127.0.0.1:55432/postgres
 
-  plugin:
-    name: plugin (typecheck + unit + client UI + build)
+  dsh-mobile-tunnel:
+    name: dsh-mobile-tunnel (typecheck + unit + client UI + build)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -64,19 +64,19 @@ jobs:
           # 插件 typecheck 会检查 ../server 的集成测试依赖，两个 lockfile 都要进缓存
           cache-dependency-path: |
             server/package-lock.json
-            plugin/package-lock.json
+            dsh-mobile-tunnel/package-lock.json
       - run: npm ci
         working-directory: server
       - run: npm ci
-        working-directory: plugin
+        working-directory: dsh-mobile-tunnel
       - run: npm run typecheck
-        working-directory: plugin
+        working-directory: dsh-mobile-tunnel
       - run: npm run test:unit
-        working-directory: plugin
+        working-directory: dsh-mobile-tunnel
       - run: npm run check:client
-        working-directory: plugin
+        working-directory: dsh-mobile-tunnel
       - run: npm run build
-        working-directory: plugin
+        working-directory: dsh-mobile-tunnel
 
   mobile:
     name: mobile (analyze + widget tests)
