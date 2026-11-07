@@ -26,3 +26,8 @@ Thumbs.db
 .screenshots/
 .tmp-*/
 docs/preview/
+
+# 构建/下载产物，不进仓库
+downloads/
+*.tgz
+*.apk
