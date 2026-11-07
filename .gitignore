@@ -7,6 +7,9 @@ build/
 mobile/build/
 *.tsbuildinfo
 # 公开仓库需要插件的预构建产物，保证 github: 安装可直接加载
+!dsh-mobile-tunnel/dist/
+!dsh-mobile-tunnel/client/
+# 过渡期兼容副本（市场旧 url 仍指向 plugin/）
 !plugin/dist/
 !plugin/client/
 

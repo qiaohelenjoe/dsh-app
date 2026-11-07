@@ -11,7 +11,7 @@
 ## 检查清单
 
 - [ ] 服务端：`cd server && npm run typecheck && npm run test`
-- [ ] 插件：`cd plugin && npm run typecheck && npm run test:unit && npm run check:client && npm run build`
+- [ ] 插件：`cd dsh-mobile-tunnel && npm run typecheck && npm run test:unit && npm run check:client && npm run build`
 - [ ] 移动端：`cd mobile && flutter analyze && flutter test`
 - [ ] 适配层（如改动）：`cd mobile-adapt && npm test`
 - [ ] 没有提交任何密钥、证书、口令、生产服务器地址

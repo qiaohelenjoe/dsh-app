@@ -9,7 +9,7 @@
  *
  * 未携带 mid 的 wsdata 视为完整消息，保持 v1 行为。
  *
- * 注意：plugin/src/ws-fragment.ts 有同构实现（插件发布产物不能依赖 server 包），
+ * 注意：dsh-mobile-tunnel/src/ws-fragment.ts 有同构实现（插件发布产物不能依赖 server 包），
  * 两侧协议字段/限制需要同步修改。
  */
 import {
