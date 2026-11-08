@@ -15,6 +15,7 @@ interface DeviceView {
   name: string;
   platform: string;
   online: boolean;
+  connected?: boolean;
   lastSeenAt: string | null;
   appVersion: string | null;
   createdAt: string;
@@ -57,6 +58,38 @@ describe('设备 API（T03）', () => {
       assert.equal(devices[0]?.online, true);
       assert.ok(devices[0]?.lastSeenAt);
       assert.ok(!devices.some((device) => device.id === sessionB.deviceId), '不应返回其他账号设备');
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  test('在线真值：活跃隧道会话覆盖数据库时间窗', async () => {
+    let liveDeviceId: string | null = null;
+    const tunnel: TunnelControl = {
+      disconnectDevice(): void {},
+      isOnline: (deviceId: string): boolean => deviceId === liveDeviceId,
+    };
+    const ctx = await createAuthTestContext({}, { tunnel });
+    try {
+      await registerAccount(ctx);
+      const session = await loginAccount(ctx);
+      // 数据库时间窗已过期：仅靠 last_seen_at 会判离线
+      await ctx.pool.query("UPDATE devices SET last_seen_at = now() - interval '10 minutes' WHERE id = $1", [
+        session.deviceId,
+      ]);
+      liveDeviceId = session.deviceId;
+      const response = await listDevices(ctx, session);
+      assert.equal(response.statusCode, 200);
+      const device = (response.json() as DevicesBody).devices.find((item) => item.id === session.deviceId);
+      assert.equal(device?.online, true, '有活跃隧道会话时应判在线');
+      assert.equal(device?.connected, true);
+
+      // 会话消失后回落到数据库时间窗：过期即离线
+      liveDeviceId = null;
+      const after = await listDevices(ctx, session);
+      const offlineDevice = (after.json() as DevicesBody).devices.find((item) => item.id === session.deviceId);
+      assert.equal(offlineDevice?.online, false);
+      assert.equal(offlineDevice?.connected, false);
     } finally {
       await ctx.close();
     }

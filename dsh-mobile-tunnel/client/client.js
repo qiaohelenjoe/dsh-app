@@ -25,7 +25,7 @@ window.__ModuleLoader__.load({
 		const HIDDEN_FLAG = 'data-dshmf-hidden';
 		const PANEL_ID = 'dsh-mobile-files-panel';
 		const STYLE_ID = 'dsh-mobile-files-style';
-		const PANEL_VERSION = '1.1.0';
+		const PANEL_VERSION = '1.1.1';
 		const BASE = '/plugins/dsh-mobile-tunnel';
 		const DIAG_ROUTE = BASE + '/diag';
 		const ROOTS_ROUTE = BASE + '/fs-roots';

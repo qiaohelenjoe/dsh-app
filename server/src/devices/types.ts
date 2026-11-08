@@ -23,6 +23,8 @@ export interface DeviceView {
   name: string;
   platform: string;
   online: boolean;
+  /** 是否有活跃隧道会话（在线真值；与 online 的数据库时间窗判定互补）。 */
+  connected?: boolean;
   lastSeenAt: string | null;
   appVersion: string | null;
   createdAt: string;

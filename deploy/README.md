@@ -35,6 +35,7 @@ docker compose down -v
 
 前置：已安装 Docker + Compose（生产为 Docker 26 / Compose v2.27），nginx 已有 `*.hbzxht.com` 泛域名证书。
 
+
 ```bash
 # 0) 备份 nginx 配置（发布前必须）
 TS=$(date +%Y%m%d_%H%M%S)

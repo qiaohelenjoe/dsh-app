@@ -1,5 +1,11 @@
 import { fileURLToPath } from 'node:url';
 import { defaultMigrationsDir } from './db/migrate.js';
+import {
+  DEFAULT_HEARTBEAT_SEC,
+  DEFAULT_OFFLINE_SEC,
+  DEFAULT_RECONNECT_GRACE_SEC,
+  DEFAULT_SEEN_THROTTLE_SEC,
+} from './tunnel/protocol.js';
 
 export interface AuthConfig {
   jwtSecret: string;
@@ -23,6 +29,25 @@ export interface ServerConfig {
   auth: AuthConfig;
   /** 兼容开关：允许旧版 Bearer 直接升级隧道（默认 false，仅灰度回滚时打开）。 */
   allowTunnelBearer: boolean;
+  /** 隧道心跳/离线/宽限参数（可用环境变量热调，不改变默认行为需要重启）。 */
+  tunnel: TunnelConfig;
+}
+
+export interface TunnelConfig {
+  heartbeatSec: number;
+  offlineSec: number;
+  reconnectGraceSec: number;
+  seenThrottleSec: number;
+}
+
+function readPositiveNumber(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
+  const raw = env[key]?.trim();
+  if (!raw) return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`环境变量 ${key} 非法：${raw}`);
+  }
+  return value;
 }
 
 export function defaultWeakPasswordListPath(): string {
@@ -81,6 +106,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     migrationsDir: env.MIGRATIONS_DIR?.trim() || defaultMigrationsDir(),
     apkDir: env.APK_DIR?.trim() || '/app/apk',
     allowTunnelBearer: env.ALLOW_TUNNEL_BEARER === 'true',
+    tunnel: {
+      heartbeatSec: readPositiveNumber(env, 'TUNNEL_HEARTBEAT_SEC', DEFAULT_HEARTBEAT_SEC),
+      offlineSec: readPositiveNumber(env, 'TUNNEL_OFFLINE_SEC', DEFAULT_OFFLINE_SEC),
+      reconnectGraceSec: readPositiveNumber(env, 'TUNNEL_RECONNECT_GRACE_SEC', DEFAULT_RECONNECT_GRACE_SEC),
+      seenThrottleSec: readPositiveNumber(env, 'DEVICE_SEEN_THROTTLE_SEC', DEFAULT_SEEN_THROTTLE_SEC),
+    },
     auth: {
       jwtSecret,
       refreshPepper,

@@ -23,6 +23,8 @@ export const WORKSPACE_ROUTE = '/plugins/dsh-mobile-tunnel/workspace';
 /** 客户端自报诊断日志：写本机文件，供排查用（只追加文本，不接受任意路径）。 */
 export const DIAG_ROUTE = '/plugins/dsh-mobile-tunnel/diag';
 export const DIAG_LOG = join(homedir(), '.dsh', 'dsh-mobile-tunnel-diag.log');
+/** 只读隧道状态（真连接状态、最后帧时间、重连次数、最近失败原因），排障用。 */
+export const TUNNEL_STATUS_ROUTE = '/plugins/dsh-mobile-tunnel/tunnel-status';
 async function handleDiag(req, res) {
     if (req.method !== 'POST') {
         let text = '';
@@ -45,6 +47,26 @@ async function handleDiag(req, res) {
     try {
         appendFileSync(DIAG_LOG, `${new Date().toISOString()} ${body.slice(0, 4000)}\n`, 'utf8');
         sendJson(res, 200, { ok: true });
+    }
+    catch (error) {
+        sendJson(res, 500, { error: String(error.message) });
+    }
+}
+async function handleTunnelStatus(req, res, getDiagnostics) {
+    if (!sameOrigin(req)) {
+        sendJson(res, 403, { error: 'origin-rejected' });
+        return;
+    }
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+        sendJson(res, 405, { error: 'method-not-allowed' });
+        return;
+    }
+    if (!getDiagnostics) {
+        sendJson(res, 503, { error: 'unavailable' });
+        return;
+    }
+    try {
+        sendJson(res, 200, { tunnel: getDiagnostics() });
     }
     catch (error) {
         sendJson(res, 500, { error: String(error.message) });
@@ -193,7 +215,7 @@ async function handle(req, res, store, publicConfig, log) {
  * 等宿主 `webServer` 就绪后注册路由（apply 可能早于该服务装配）。
  * 注册成功返回；宿主持久不可用则安静放弃，不影响隧道。
  */
-export function registerPanelSessionRoutes(ctx, store, publicConfig, log) {
+export function registerPanelSessionRoutes(ctx, store, publicConfig, log, getTunnelDiagnostics) {
     let disposed = false;
     let release;
     let retries = 0;
@@ -233,6 +255,15 @@ export function registerPanelSessionRoutes(ctx, store, publicConfig, log) {
             });
             if (typeof diagRegistered === 'function')
                 disposers.push(diagRegistered);
+            const statusRegistered = webServer.register({
+                kind: 'exact',
+                path: TUNNEL_STATUS_ROUTE,
+                handler: (req, res) => {
+                    void handleTunnelStatus(req, res, getTunnelDiagnostics);
+                },
+            });
+            if (typeof statusRegistered === 'function')
+                disposers.push(statusRegistered);
             const fsRoots = webServer.register({
                 kind: 'exact',
                 path: FS_ROOTS_ROUTE,

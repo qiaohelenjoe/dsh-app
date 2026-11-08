@@ -1,0 +1,16 @@
+#!/bin/sh
+# 提交前拦截：不要把构建/下载产物与凭据带进仓库（内部文档 .spec-workflow/ 允许提交，公开同步由 snapshot guard 负责）。
+# 启用方式（每个克隆执行一次）：git config core.hooksPath .githooks
+set -e
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+[ -z "$staged" ] && exit 0
+pattern='(^|/)(downloads|node_modules)/|\.(apk|tgz|zip|7z|jks|keystore|pem|log)$|\.env$|(^|/)key\.properties$|(^|/)\.npmrc$|(^|/)id_rsa$'
+matches=$(printf '%s\n' "$staged" | grep -E "$pattern" || true)
+if [ -n "$matches" ]; then
+  printf '\n[pre-commit] 提交被拦截：检测到不应提交的文件\n'
+  printf '%s\n' "$matches" | sed 's/^/  - /'
+  printf '\n处理：git restore --staged <文件> 后重新提交。\n'
+  printf '若确认必须提交（例如公开仓库需要构建产物），逐个核对后用：git commit --no-verify\n\n'
+  exit 1
+fi
+exit 0

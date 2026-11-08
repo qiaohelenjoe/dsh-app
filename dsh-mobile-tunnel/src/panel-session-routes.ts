@@ -35,6 +35,9 @@ export const WORKSPACE_ROUTE = '/plugins/dsh-mobile-tunnel/workspace';
 export const DIAG_ROUTE = '/plugins/dsh-mobile-tunnel/diag';
 export const DIAG_LOG = join(homedir(), '.dsh', 'dsh-mobile-tunnel-diag.log');
 
+/** 只读隧道状态（真连接状态、最后帧时间、重连次数、最近失败原因），排障用。 */
+export const TUNNEL_STATUS_ROUTE = '/plugins/dsh-mobile-tunnel/tunnel-status';
+
 async function handleDiag(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method !== 'POST') {
     let text = '';
@@ -55,6 +58,30 @@ async function handleDiag(req: IncomingMessage, res: ServerResponse): Promise<vo
   try {
     appendFileSync(DIAG_LOG, `${new Date().toISOString()} ${body.slice(0, 4000)}\n`, 'utf8');
     sendJson(res, 200, { ok: true });
+  } catch (error) {
+    sendJson(res, 500, { error: String((error as Error).message) });
+  }
+}
+
+async function handleTunnelStatus(
+  req: IncomingMessage,
+  res: ServerResponse,
+  getDiagnostics?: () => unknown,
+): Promise<void> {
+  if (!sameOrigin(req)) {
+    sendJson(res, 403, { error: 'origin-rejected' });
+    return;
+  }
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    sendJson(res, 405, { error: 'method-not-allowed' });
+    return;
+  }
+  if (!getDiagnostics) {
+    sendJson(res, 503, { error: 'unavailable' });
+    return;
+  }
+  try {
+    sendJson(res, 200, { tunnel: getDiagnostics() });
   } catch (error) {
     sendJson(res, 500, { error: String((error as Error).message) });
   }
@@ -234,6 +261,7 @@ export function registerPanelSessionRoutes(
   store: PanelSessionStore,
   publicConfig: PanelPublicConfig,
   log: (message: string) => void,
+  getTunnelDiagnostics?: () => unknown,
 ): void {
   let disposed = false;
   let release: (() => void) | undefined;
@@ -261,14 +289,24 @@ export function registerPanelSessionRoutes(
           void handleWorkspace(req, res);
         },
       });
-      if (typeof workspaceRegistered === 'function') disposers.push(workspaceRegistered as () => void);      const diagRegistered = webServer.register({
+      if (typeof workspaceRegistered === 'function') disposers.push(workspaceRegistered as () => void);
+      const diagRegistered = webServer.register({
         kind: 'exact',
         path: DIAG_ROUTE,
         handler: (req, res) => {
           void handleDiag(req, res);
         },
       });
-      if (typeof diagRegistered === 'function') disposers.push(diagRegistered as () => void);      const fsRoots = webServer.register({
+      if (typeof diagRegistered === 'function') disposers.push(diagRegistered as () => void);
+      const statusRegistered = webServer.register({
+        kind: 'exact',
+        path: TUNNEL_STATUS_ROUTE,
+        handler: (req, res) => {
+          void handleTunnelStatus(req, res, getTunnelDiagnostics);
+        },
+      });
+      if (typeof statusRegistered === 'function') disposers.push(statusRegistered as () => void);
+      const fsRoots = webServer.register({
         kind: 'exact',
         path: FS_ROOTS_ROUTE,
         handler: (req, res) => {

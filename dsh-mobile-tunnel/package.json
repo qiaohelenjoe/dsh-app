@@ -1,6 +1,6 @@
 {
   "name": "dsh-mobile-tunnel",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "type": "module",
   "description": "DSH 桌面端插件：账号登录、出站隧道、PC 端账号面板与手机 App 下载入口",
   "author": "乔晟",
@@ -43,8 +43,8 @@
     "prepublishOnly": "npm run build",
     "typecheck": "tsc -p tsconfig.json",
     "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.client.json && node scripts/build-client.mjs",
-    "test": "node --import tsx --test test/ws-fragment.test.ts test/panel-session.test.ts test/plugin.integration.test.ts",
-    "test:unit": "node --import tsx --test test/ws-fragment.test.ts test/panel-session.test.ts"
+    "test": "node --import tsx --test test/ws-fragment.test.ts test/panel-session.test.ts test/tunnel-client.test.ts test/plugin.integration.test.ts",
+    "test:unit": "node --import tsx --test test/ws-fragment.test.ts test/panel-session.test.ts test/tunnel-client.test.ts"
   },
   "dependencies": {
     "ws": "^8.18.0"
