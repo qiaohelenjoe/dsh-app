@@ -145,6 +145,9 @@ npm run test:browser
   [`deploy/clean-dsh-auth-cookies.mjs`](deploy/clean-dsh-auth-cookies.mjs) 手动兜底。
 - 桌面插件设置页卡片依赖 DSH 未公开 UI API；未挂载时用 `dsh-mobile-tunnel/scripts/login.mjs` 兜底。
 - 隧道票据为单实例内存实现，多实例需改共享存储。
+- 弱网下手机端一度显示「离线」：1.1.1 起在线状态改为按**隧道活跃会话真值**判定（不再只靠 90 秒时间窗），
+  插件增加连接超时、保活看门狗、网络变化立即重连；服务端参数可用 `TUNNEL_OFFLINE_SEC`、`TUNNEL_RECONNECT_GRACE_SEC`
+  等环境变量调整。排障可用 `GET /plugins/dsh-mobile-tunnel/tunnel-status` 查看真实连接状态。
 
 ## 版本规划
 
@@ -157,7 +160,7 @@ npm run test:browser
 | Android | 跟随 DSH 版本持续迭代，官网下载页与国内应用商店同步更新 |
 
 PC 端插件（`dsh-mobile-tunnel`）按功能迭代独立发版，与移动端版本号解耦：
-当前 `latest` 为 **1.1.0**（新增移动端文件面板；入口沿用右侧面板的「工作区文件」）。
+当前 `latest` 为 **1.1.1**（新增移动端文件面板；1.1.1 修复弱网下手机端长期显示「离线」：在线判定改用隧道会话真值 + 断连宽限，插件增加连接超时/保活看门狗/网络变化重连）。
 
 ## 运维脚本
 

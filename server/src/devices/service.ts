@@ -65,7 +65,13 @@ export class DeviceService {
 
   async list(accountId: string): Promise<DeviceView[]> {
     const rows = await listAliveDevices(this.pool, accountId);
-    return rows.map(toView);
+    const isOnline = this.deps.tunnel?.isOnline;
+    return rows.map((row) => {
+      const view = toView(row);
+      // 在线真值：有活跃隧道会话即在线；否则退回数据库时间窗判定（服务端重启后的短暂空档）
+      const connected = isOnline ? isOnline.call(this.deps.tunnel, row.id) : false;
+      return connected ? { ...view, online: true, connected: true } : { ...view, connected: view.online };
+    });
   }
 
   /** 登记设备：先查配额（403），再查注册频率（429），最后插入并处理同名冲突（409）。 */

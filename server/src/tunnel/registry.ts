@@ -19,7 +19,9 @@ import {
   DEFAULT_MAX_PENDING_WS_MESSAGES,
   DEFAULT_MAX_WS_PER_DEVICE,
   DEFAULT_OFFLINE_SEC,
+  DEFAULT_RECONNECT_GRACE_SEC,
   DEFAULT_REQUEST_TIMEOUT_MS,
+  DEFAULT_SEEN_THROTTLE_SEC,
   DEFAULT_WS_CHUNK_BYTES,
   DEFAULT_WS_MAX_MESSAGE_BYTES,
   DEFAULT_WS_REASSEMBLY_TIMEOUT_MS,
@@ -54,6 +56,10 @@ export interface TunnelRegistryOptions {
   jwtSecret: string;
   heartbeatSec?: number;
   offlineSec?: number;
+  /** 断开后延迟多久才把设备标记为离线（默认 15s，宽限期内重连不闪断）。 */
+  reconnectGraceSec?: number;
+  /** 入站帧刷新 last_seen_at 的节流间隔（默认 10s）。 */
+  seenThrottleSec?: number;
   maxInflight?: number;
   maxFrameBytes?: number;
   maxWsPerDevice?: number;
@@ -133,6 +139,12 @@ export class TunnelRegistry implements TunnelControl {
   private readonly wss: WebSocketServer;
   private readonly heartbeatMs: number;
   private readonly offlineMs: number;
+  private readonly reconnectGraceMs: number;
+  private readonly seenThrottleMs: number;
+  /** 待执行的「宽限期后标记离线」定时器（重连成功即取消）。 */
+  private readonly offlineTimers = new Map<string, NodeJS.Timeout>();
+  /** 各设备最近一次写 last_seen_at 的时间（节流用）。 */
+  private readonly lastSeenWriteAt = new Map<string, number>();
   private readonly maxInflight: number;
   private readonly maxFrameBytes: number;
   private readonly maxWsPerDevice: number;
@@ -153,6 +165,8 @@ export class TunnelRegistry implements TunnelControl {
   constructor(private readonly options: TunnelRegistryOptions) {
     this.heartbeatMs = (options.heartbeatSec ?? DEFAULT_HEARTBEAT_SEC) * 1000;
     this.offlineMs = (options.offlineSec ?? DEFAULT_OFFLINE_SEC) * 1000;
+    this.reconnectGraceMs = (options.reconnectGraceSec ?? DEFAULT_RECONNECT_GRACE_SEC) * 1000;
+    this.seenThrottleMs = (options.seenThrottleSec ?? DEFAULT_SEEN_THROTTLE_SEC) * 1000;
     this.maxInflight = options.maxInflight ?? DEFAULT_MAX_INFLIGHT;
     this.maxFrameBytes = options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
     this.maxWsPerDevice = options.maxWsPerDevice ?? DEFAULT_MAX_WS_PER_DEVICE;
@@ -339,8 +353,49 @@ export class TunnelRegistry implements TunnelControl {
   }
 
   close(): void {
+    for (const timer of this.offlineTimers.values()) clearTimeout(timer);
+    this.offlineTimers.clear();
+    this.lastSeenWriteAt.clear();
     for (const session of [...this.sessions.values()]) {
       this.closeSession(session, 'server-shutdown', 1001);
+    }
+  }
+
+  /**
+   * 刷新设备 last_seen_at（默认按 seenThrottleMs 节流）。
+   * force=true 时忽略节流（服务端心跳、注册时用）。
+   */
+  private touchDeviceSeen(session: TunnelSession, force = false): void {
+    const now = Date.now();
+    const last = this.lastSeenWriteAt.get(session.deviceId) ?? 0;
+    if (!force && now - last < this.seenThrottleMs) return;
+    this.lastSeenWriteAt.set(session.deviceId, now);
+    void markDeviceSeen(this.pool, session.deviceId, session.remoteAddress).catch(() => undefined);
+  }
+
+  /** 会话断开后延迟标记离线；宽限期内重连成功会被 cancelOfflineSoon 取消。 */
+  private scheduleOfflineMark(deviceId: string): void {
+    if (this.offlineTimers.has(deviceId)) return;
+    if (this.reconnectGraceMs <= 0) {
+      void markDeviceOffline(this.pool, deviceId).catch(() => undefined);
+      return;
+    }
+    const timer = setTimeout(() => {
+      this.offlineTimers.delete(deviceId);
+      this.lastSeenWriteAt.delete(deviceId);
+      if (!this.isOnline(deviceId)) {
+        void markDeviceOffline(this.pool, deviceId).catch(() => undefined);
+      }
+    }, this.reconnectGraceMs);
+    if (typeof timer.unref === 'function') timer.unref();
+    this.offlineTimers.set(deviceId, timer);
+  }
+
+  private cancelOfflineSoon(deviceId: string): void {
+    const timer = this.offlineTimers.get(deviceId);
+    if (timer) {
+      clearTimeout(timer);
+      this.offlineTimers.delete(deviceId);
     }
   }
 
@@ -477,6 +532,7 @@ export class TunnelRegistry implements TunnelControl {
           }
 
           session.lastActivityAt = Date.now();
+          this.touchDeviceSeen(session);
           switch (frame.t) {
             case 'ping':
               socket.send(JSON.stringify({ t: 'pong' }));
@@ -544,6 +600,7 @@ export class TunnelRegistry implements TunnelControl {
 
     const existing = this.sessions.get(deviceId);
     if (existing) this.closeSession(existing, 'replaced', 4000);
+    this.cancelOfflineSoon(deviceId);
 
     const session: TunnelSession = {
       deviceId,
@@ -567,6 +624,7 @@ export class TunnelRegistry implements TunnelControl {
     if (typeof session.heartbeatTimer.unref === 'function') session.heartbeatTimer.unref();
 
     await markDeviceSeen(this.pool, deviceId, remoteAddress);
+    this.lastSeenWriteAt.set(deviceId, Date.now());
     socket.send(
       encodeServerFrame({
         t: 'registered',
@@ -583,7 +641,10 @@ export class TunnelRegistry implements TunnelControl {
   private heartbeat(session: TunnelSession): void {
     if (session.closed) return;
     if (Date.now() - session.lastActivityAt > this.offlineMs) {
+      // 心跳超时已证明连接不可用，直接判离线（宽限期只用于「刚断开、可能马上重连」的场景）
+      this.cancelOfflineSoon(session.deviceId);
       void markDeviceOffline(this.pool, session.deviceId).catch(() => undefined);
+      this.lastSeenWriteAt.delete(session.deviceId);
       this.closeSession(session, 'heartbeat-timeout', 4005);
       return;
     }
@@ -593,7 +654,7 @@ export class TunnelRegistry implements TunnelControl {
       this.closeSession(session, 'send-failed', 1011);
       return;
     }
-    void markDeviceSeen(this.pool, session.deviceId, session.remoteAddress).catch(() => undefined);
+    this.touchDeviceSeen(session, true);
   }
 
   private handleResponse(session: TunnelSession, frame: ResponseFrame): void {
@@ -799,7 +860,8 @@ export class TunnelRegistry implements TunnelControl {
     session.reassembler.reset();
     if (this.sessions.get(session.deviceId) === session) {
       this.sessions.delete(session.deviceId);
-      void markDeviceOffline(this.pool, session.deviceId).catch(() => undefined);
+      // 延迟标记离线：宽限期内重连成功则保持在线，避免一次抖动就「闪断」
+      this.scheduleOfflineMark(session.deviceId);
     }
   }
 }

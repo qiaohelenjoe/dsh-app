@@ -1,10 +1,11 @@
 import { WebSocket } from 'ws';
+import { networkInterfaces } from 'node:os';
 import { DEFAULT_WS_CHUNK_BYTES, DEFAULT_WS_MAX_MESSAGE_BYTES, DEFAULT_WS_REASSEMBLY_TIMEOUT_MS, DEFAULT_MAX_PENDING_WS_MESSAGES, WS_FRAGMENT_PROTOCOL_VERSION, WsFragmentReassembler, fragmentWsData, } from './ws-fragment.js';
 /** 桌面端当前实现的隧道协议版本（v2：wsdata 分片）。 */
 const TUNNEL_PROTOCOL_VERSION = 2;
 /**
  * 桌面端隧道客户端：出站 WSS、register 握手、心跳、req/res 转发、
- * wsopen/wsdata/wsclose 双向代理、指数退避重连（上限 30 秒）。
+ * wsopen/wsdata/wsclose 双向代理、指数退避重连（封顶 10 秒、带抖动）。
  */
 export class TunnelClient {
     options;
@@ -13,20 +14,40 @@ export class TunnelClient {
     online = false;
     attempts = 0;
     reconnectTimer = null;
+    connectTimer = null;
+    keepaliveTimer = null;
+    networkTimer = null;
     status = 'stopped';
     channels = new Map();
     backoffBaseMs;
     backoffMaxMs;
+    connectTimeoutMs;
+    keepaliveMs;
+    deadAfterMs;
+    deadAfterConfigured;
+    networkWatchMs;
     chunkBytes;
     wsMessageMaxBytes;
     reassembler;
     /** 协商后的协议版本：连接旧服务端（4006）时回落到 v1，关闭分片。 */
     protocolVersion = TUNNEL_PROTOCOL_VERSION;
     messageCounter = 0;
+    /** 每次建链自增，用于丢弃旧 socket 的迟到事件。 */
+    connectGeneration = 0;
+    lastInboundAt = 0;
+    lastFrameAt = 0;
+    lastConnectedAt = 0;
+    lastError = null;
+    lastNetworkSignature = '';
     constructor(options) {
         this.options = options;
         this.backoffBaseMs = options.backoffBaseMs ?? 1000;
-        this.backoffMaxMs = options.backoffMaxMs ?? 30_000;
+        this.backoffMaxMs = options.backoffMaxMs ?? 10_000;
+        this.connectTimeoutMs = options.connectTimeoutMs ?? 10_000;
+        this.keepaliveMs = options.keepaliveMs ?? 25_000;
+        this.deadAfterMs = options.deadAfterMs ?? 75_000;
+        this.deadAfterConfigured = options.deadAfterMs !== undefined;
+        this.networkWatchMs = options.networkWatchMs ?? 10_000;
         this.chunkBytes = options.chunkBytes ?? DEFAULT_WS_CHUNK_BYTES;
         this.wsMessageMaxBytes = options.wsMessageMaxBytes ?? DEFAULT_WS_MAX_MESSAGE_BYTES;
         this.reassembler = new WsFragmentReassembler({
@@ -39,20 +60,36 @@ export class TunnelClient {
     get isOnline() {
         return this.online;
     }
+    /** 诊断快照（供宿主只读接口 / 状态卡片使用）。 */
+    getDiagnostics() {
+        return {
+            status: this.status,
+            online: this.online,
+            attempts: this.attempts,
+            protocolVersion: this.protocolVersion,
+            deviceId: this.options.deviceId,
+            serverBaseUrl: this.options.serverBaseUrl,
+            lastConnectedAt: this.lastConnectedAt ? new Date(this.lastConnectedAt).toISOString() : null,
+            lastFrameAt: this.lastFrameAt ? new Date(this.lastFrameAt).toISOString() : null,
+            lastError: this.lastError,
+            connectTimeoutMs: this.connectTimeoutMs,
+            keepaliveMs: this.keepaliveMs,
+            deadAfterMs: this.deadAfterMs,
+            backoffMaxMs: this.backoffMaxMs,
+        };
+    }
     start() {
-        if (this.stopped && this.status === 'stopped') {
-            this.stopped = false;
-        }
         this.stopped = false;
+        this.startNetworkWatch();
         this.connect();
     }
     stop(reason = 'plugin-stop') {
         this.stopped = true;
         this.online = false;
-        if (this.reconnectTimer) {
-            clearTimeout(this.reconnectTimer);
-            this.reconnectTimer = null;
-        }
+        this.stopReconnectTimer();
+        this.clearConnectTimer();
+        this.stopKeepalive();
+        this.stopNetworkWatch();
         for (const channel of this.channels.values())
             channel.close(1001, reason);
         this.channels.clear();
@@ -93,6 +130,7 @@ export class TunnelClient {
     async connect() {
         if (this.stopped)
             return;
+        const generation = ++this.connectGeneration;
         this.setStatus(this.attempts === 0 ? 'connecting' : 'reconnecting');
         let token = await this.options.getAccessToken().catch(() => null);
         if (!token)
@@ -117,6 +155,8 @@ export class TunnelClient {
                 return;
             }
         }
+        if (this.stopped || generation !== this.connectGeneration)
+            return;
         // 分片帧大小 = base64(chunkBytes) + JSON 头；按配置留足余量，默认仍远小于 2 MiB。
         const frameBudget = Math.ceil((this.chunkBytes * 4) / 3) + 64 * 1024;
         const socket = new WebSocket(this.wsUrl(ticket), {
@@ -124,14 +164,34 @@ export class TunnelClient {
             maxPayload: Math.max(2 * 1024 * 1024, frameBudget),
         });
         this.socket = socket;
+        // 连接超时：握手/注册迟迟不完成（弱网、NAT 黑洞）时强制重建，避免永远卡在 connecting
+        const timer = setTimeout(() => {
+            if (generation !== this.connectGeneration)
+                return;
+            this.log(`连接超时（${this.connectTimeoutMs}ms 未完成注册），强制重建`);
+            this.hardReconnect(socket, generation, 'connect-timeout');
+        }, this.connectTimeoutMs);
+        if (typeof timer.unref === 'function')
+            timer.unref();
+        this.connectTimer = timer;
         socket.on('open', () => {
+            if (generation !== this.connectGeneration)
+                return;
             this.log(`已连接，发送 register（protocol=${this.protocolVersion}）`);
             socket.send(JSON.stringify({ t: 'register', deviceId: this.options.deviceId, protocol: this.protocolVersion }));
         });
         socket.on('message', (data) => {
+            if (generation !== this.connectGeneration)
+                return;
+            const now = Date.now();
+            this.lastInboundAt = now;
+            this.lastFrameAt = now;
             void this.handleFrame(data.toString());
         });
         socket.on('unexpected-response', (_request, response) => {
+            if (generation !== this.connectGeneration)
+                return;
+            this.clearConnectTimer();
             response.resume();
             if (response.statusCode === 401) {
                 this.log('隧道鉴权失败（401），重新申请票据后重连');
@@ -150,6 +210,10 @@ export class TunnelClient {
             this.scheduleReconnect(`http-${response.statusCode}`);
         });
         socket.on('close', (code, reason) => {
+            if (generation !== this.connectGeneration)
+                return;
+            this.clearConnectTimer();
+            this.stopKeepalive();
             this.online = false;
             this.reassembler.reset();
             for (const channel of this.channels.values())
@@ -173,16 +237,121 @@ export class TunnelClient {
                 return;
             this.scheduleReconnect(`close-${code}`);
         });
-        socket.on('error', () => {
+        socket.on('error', (error) => {
+            this.lastError = `socket-error: ${error.message}`;
             // 交给 close 处理
         });
+    }
+    /** 丢弃当前 socket 并立即重连（连接超时、死连接、网络变化时用）。 */
+    hardReconnect(socket, generation, reason) {
+        if (generation !== this.connectGeneration)
+            return;
+        this.lastError = reason;
+        this.clearConnectTimer();
+        this.stopKeepalive();
+        this.online = false;
+        this.connectGeneration += 1;
+        try {
+            socket?.terminate();
+        }
+        catch {
+            // 忽略
+        }
+        this.socket = null;
+        if (this.stopped)
+            return;
+        this.scheduleReconnect(reason, 0);
+    }
+    clearConnectTimer() {
+        if (this.connectTimer) {
+            clearTimeout(this.connectTimer);
+            this.connectTimer = null;
+        }
+    }
+    stopReconnectTimer() {
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
+    }
+    /** 客户端保活：定期 ping，并在长时间无入站数据时判定连接已死。 */
+    startKeepalive() {
+        this.stopKeepalive();
+        this.lastInboundAt = Date.now();
+        const timer = setInterval(() => this.checkKeepalive(), this.keepaliveMs);
+        if (typeof timer.unref === 'function')
+            timer.unref();
+        this.keepaliveTimer = timer;
+    }
+    stopKeepalive() {
+        if (this.keepaliveTimer) {
+            clearInterval(this.keepaliveTimer);
+            this.keepaliveTimer = null;
+        }
+    }
+    checkKeepalive() {
+        const socket = this.socket;
+        if (!socket || socket.readyState !== WebSocket.OPEN || !this.online)
+            return;
+        if (this.deadAfterMs > 0 && Date.now() - this.lastInboundAt > this.deadAfterMs) {
+            this.log(`超过 ${this.deadAfterMs}ms 未收到任何数据，判定连接已死，强制重连`);
+            this.hardReconnect(socket, this.connectGeneration, 'keepalive-timeout');
+            return;
+        }
+        try {
+            socket.send(JSON.stringify({ t: 'ping' }));
+        }
+        catch (error) {
+            this.lastError = `ping-failed: ${error.message}`;
+            this.hardReconnect(socket, this.connectGeneration, 'ping-send-failed');
+        }
+    }
+    /** 网卡地址变化（切 Wi-Fi、插拔网线、VPN 起停、休眠唤醒）时立即重连。 */
+    startNetworkWatch() {
+        if (this.networkTimer)
+            return;
+        this.lastNetworkSignature = this.networkSignature();
+        const timer = setInterval(() => {
+            const signature = this.networkSignature();
+            if (signature === this.lastNetworkSignature)
+                return;
+            this.lastNetworkSignature = signature;
+            this.log('检测到网络变化，立即重连');
+            this.attempts = 0;
+            const socket = this.socket;
+            if (!socket) {
+                this.stopReconnectTimer();
+                void this.connect();
+                return;
+            }
+            this.hardReconnect(socket, this.connectGeneration, 'network-changed');
+        }, this.networkWatchMs);
+        if (typeof timer.unref === 'function')
+            timer.unref();
+        this.networkTimer = timer;
+    }
+    stopNetworkWatch() {
+        if (this.networkTimer) {
+            clearInterval(this.networkTimer);
+            this.networkTimer = null;
+        }
+    }
+    networkSignature() {
+        const addresses = this.options.listNetworkAddresses
+            ? this.options.listNetworkAddresses()
+            : defaultNetworkAddresses();
+        return addresses.slice().sort().join(',');
     }
     scheduleReconnect(reason, overrideDelayMs) {
         if (this.stopped || this.reconnectTimer)
             return;
         this.online = false;
-        const delay = overrideDelayMs ??
+        this.lastError = reason;
+        // 抖动：避免多台设备在同一时刻集中重连
+        const base = overrideDelayMs ??
             Math.min(this.backoffMaxMs, this.backoffBaseMs * Math.pow(2, Math.min(this.attempts, 10)));
+        const jitter = overrideDelayMs === undefined ? 0.7 + Math.random() * 0.6 : 1;
+        const delay = Math.max(0, Math.round(base * jitter));
         this.attempts += 1;
         this.log(`将在 ${delay}ms 后重连（${reason}）`);
         this.setStatus('reconnecting', reason);
@@ -200,12 +369,22 @@ export class TunnelClient {
             return;
         }
         switch (frame.t) {
-            case 'registered':
+            case 'registered': {
+                this.clearConnectTimer();
                 this.online = true;
                 this.attempts = 0;
+                this.lastConnectedAt = Date.now();
+                this.lastInboundAt = Date.now();
+                const heartbeatSec = typeof frame['heartbeatSec'] === 'number' ? frame['heartbeatSec'] : null;
+                if (heartbeatSec && heartbeatSec > 0 && !this.deadAfterConfigured) {
+                    // 未显式配置时，死连接阈值取心跳间隔的 3 倍（不低于默认 75 秒的语义）
+                    this.deadAfterMs = Math.max(this.deadAfterMs, heartbeatSec * 1000 * 3);
+                }
+                this.startKeepalive();
                 this.setStatus('online');
                 this.log('隧道已上线');
                 break;
+            }
             case 'ping':
                 this.socket?.send(JSON.stringify({ t: 'pong' }));
                 break;
@@ -367,5 +546,20 @@ export class TunnelClient {
             // 忽略已关闭连接；onClose 会向服务端发 wsclose
         }
     }
+}
+/** 非回环网卡地址集合：用于检测 Wi-Fi/有线的切换与断开。 */
+function defaultNetworkAddresses() {
+    const result = [];
+    const interfaces = networkInterfaces();
+    for (const name of Object.keys(interfaces)) {
+        for (const info of interfaces[name] ?? []) {
+            if (info.internal)
+                continue;
+            if (!info.address)
+                continue;
+            result.push(`${name}:${info.address}`);
+        }
+    }
+    return result;
 }
 //# sourceMappingURL=tunnel.js.map

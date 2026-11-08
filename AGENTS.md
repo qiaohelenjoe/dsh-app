@@ -95,6 +95,14 @@ cd deploy && cp .env.example .env && docker compose up -d --build
 - 预览能力：Markdown 渲染、JSON 美化、代码高亮+行号、图片点击放大；黑名单只挡可执行/压缩包/媒体等二进制
 - 排错：`POST /plugins/dsh-mobile-tunnel/diag` 追加写 `~/.dsh/dsh-mobile-tunnel-diag.log`，客户端自报日志（版本号、入口替换、关闭、目录加载等）
 
+## 网络与在线状态（1.1.1+）
+
+- 在线判定：服务端 `GET /v1/devices` 的 `online` = **隧道活跃会话真值** `registry.isOnline(deviceId)`，没有会话时才回落到 `last_seen_at` 时间窗；另有 `connected` 字段表示会话真值
+- 服务端参数走环境变量（改配置不用改代码）：`TUNNEL_HEARTBEAT_SEC`（默认 25）、`TUNNEL_OFFLINE_SEC`（默认 150）、`TUNNEL_RECONNECT_GRACE_SEC`（默认 15，断连后延迟标记离线的宽限）、`DEVICE_SEEN_THROTTLE_SEC`（默认 10，入站帧刷新 last_seen 的节流）
+- 插件重连策略：连接超时 10s、保活 25s、75s 无入站帧判定死连接、网卡地址变化立即重连、退避封顶 10s + 抖动；参数可用 `DSH_MT_CONNECT_TIMEOUT_MS`、`DSH_MT_KEEPALIVE_MS`、`DSH_MT_DEAD_AFTER_MS`、`DSH_MT_NETWORK_WATCH_MS`、`DSH_MT_BACKOFF_MAX_MS` 调整
+- 排障接口：`GET /plugins/dsh-mobile-tunnel/tunnel-status`（只读，回环 DSH 内可访问）返回 `status / online / attempts / lastConnectedAt / lastFrameAt / lastError / protocolVersion` 等，不包含任何凭据
+- 手机端：前台 10s / 后台 30s 轮询设备列表；离线设备显示「最后在线 x 分钟前」，点击会先刷新并自动重试约 20s，再提示离线
+
 ## 已知限制 / 待办
 
 - 桌面插件设置页卡片依赖 DSH 未公开 UI API；未挂载时用 `dsh-mobile-tunnel/scripts/login.mjs` 兜底

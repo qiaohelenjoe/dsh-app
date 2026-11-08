@@ -4,10 +4,15 @@
  */
 export interface TunnelControl {
   disconnectDevice(deviceId: string, reason: string): void | Promise<void>;
+  /** 该设备此刻是否有活跃隧道会话（在线真值；缺省实现返回 false）。 */
+  isOnline?(deviceId: string): boolean;
 }
 
 export const noopTunnelControl: TunnelControl = {
   disconnectDevice(): void {
     // 隧道服务尚未接入（T05）；撤销行为已由数据库会话级联保证
+  },
+  isOnline(): boolean {
+    return false;
   },
 };

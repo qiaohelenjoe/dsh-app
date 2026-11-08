@@ -272,6 +272,29 @@ describe('隧道服务 HTTP（T05）', () => {
     }
   });
 
+  test('断开后在宽限期内重连保持在线，超过宽限才标记离线', async () => {
+    const ctx = await createTunnelContext({ heartbeatSec: 0.2, offlineSec: 3, reconnectGraceSec: 0.6 });
+    try {
+      const first = await openTunnel(ctx);
+      first.socket.close(1000, 'bye');
+      await sleep(120);
+      assert.equal(await deviceOnline(ctx, ctx.session.deviceId), true, '宽限期内不应当立刻离线');
+
+      // 宽限期内重连成功：保持在线，且宽限计时被取消
+      const second = await openTunnel(ctx);
+      await sleep(900);
+      assert.equal(ctx.registry.isOnline(ctx.session.deviceId), true);
+      assert.equal(await deviceOnline(ctx, ctx.session.deviceId), true, '重连后应保持在线');
+
+      // 再次断开且不再重连：超过宽限后离线
+      second.socket.close(1000, 'bye');
+      await waitDeviceOffline(ctx, ctx.session.deviceId);
+      assert.equal(await deviceOnline(ctx, ctx.session.deviceId), false);
+    } finally {
+      await ctx.close();
+    }
+  });
+
   test('未完成请求超过并发上限时新请求返回 503 tunnel.busy', async () => {
     const ctx = await createTunnelContext({ maxInflight: 2 });
     try {

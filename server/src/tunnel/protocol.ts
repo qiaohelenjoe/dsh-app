@@ -11,7 +11,12 @@ export const MIN_TUNNEL_PROTOCOL_VERSION = 1;
 /** 首次支持 wsdata 分片的协议版本。 */
 export const WS_FRAGMENT_PROTOCOL_VERSION = 2;
 export const DEFAULT_HEARTBEAT_SEC = 25;
-export const DEFAULT_OFFLINE_SEC = 90;
+/** 心跳超时窗口：网络抖动时留出更长的容错，避免一次抖动就判离线。 */
+export const DEFAULT_OFFLINE_SEC = 150;
+/** 会话断开后延迟标记离线的时间：宽限期内重连成功不会出现「闪断」。 */
+export const DEFAULT_RECONNECT_GRACE_SEC = 15;
+/** 入站帧刷新 last_seen_at 的节流间隔（避免每帧写库）。 */
+export const DEFAULT_SEEN_THROTTLE_SEC = 10;
 export const DEFAULT_MAX_INFLIGHT = 32;
 export const DEFAULT_MAX_WS_PER_DEVICE = 8;
 export const DEFAULT_MAX_FRAME_BYTES = 32 * 1024 * 1024; // 32 MiB（历史会话大消息）

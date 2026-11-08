@@ -163,11 +163,13 @@ export function apply(ctx: DshHostContext, config: Partial<PluginConfig> = {}): 
   // 只有宿主机文件能让「同一台电脑登录过就不再登录」真正成立。
   // 面板的服务端地址/下载页地址都由配置下发，市场版换服务器只需改插件配置。
   const panelApiBase = resolved.serverBaseUrl.replace(/\/+$/, '');
+  let agentRef: TunnelAgent | null = null;
   registerPanelSessionRoutes(
     ctx,
     new PanelSessionStore(resolved.panelSessionPath),
     { apiBase: panelApiBase, downloadUrl: `${panelApiBase}/download` },
     (message) => log(ctx, message),
+    () => agentRef?.getTunnelDiagnostics() ?? null,
   );
   if (process.env.DSH_MOBILE_TUNNEL_DEBUG === '1') {
     try {
@@ -187,6 +189,7 @@ export function apply(ctx: DshHostContext, config: Partial<PluginConfig> = {}): 
       log: (message) => log(ctx, message),
     },
   );
+  agentRef = agent;
 
   try {
     ctx.set?.('mobile-tunnel', agent);

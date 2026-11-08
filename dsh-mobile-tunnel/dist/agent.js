@@ -8,6 +8,14 @@ import { TunnelClient } from './tunnel.js';
 /** mux 连接生命周期日志路径：DSH 不落盘 `[api-gateway]` 输出，排障只能靠插件侧记录。 */
 const MUX_LOG_PATH = join(tmpdir(), 'dsh-mobile-tunnel-mux.log');
 const MUX_LOG_LIMIT_BYTES = 512 * 1024;
+/** 读取正整数环境变量（毫秒参数），非法值回落到默认。 */
+function envMs(name, fallback) {
+    const raw = process.env[name]?.trim();
+    if (!raw)
+        return fallback;
+    const value = Number(raw);
+    return Number.isFinite(value) && value > 0 ? value : fallback;
+}
 export function muxLogPath() {
     return MUX_LOG_PATH;
 }
@@ -52,6 +60,10 @@ export class TunnelAgent {
     }
     get tunnelStatus() {
         return this.tunnel ? (this.tunnel.isOnline ? 'online' : 'reconnecting') : 'stopped';
+    }
+    /** 隧道诊断快照（只读，排障接口与状态卡片使用）。 */
+    getTunnelDiagnostics() {
+        return this.tunnel?.getDiagnostics() ?? null;
     }
     /** 冷启动：有本地凭据则静默恢复隧道（spec §6.3）。 */
     async autostart() {
@@ -165,7 +177,11 @@ export class TunnelAgent {
                 }
             },
             backoffBaseMs: this.deps.backoffBaseMs ?? 1000,
-            backoffMaxMs: 30_000,
+            backoffMaxMs: envMs('DSH_MT_BACKOFF_MAX_MS', 10_000),
+            connectTimeoutMs: envMs('DSH_MT_CONNECT_TIMEOUT_MS', 10_000),
+            keepaliveMs: envMs('DSH_MT_KEEPALIVE_MS', 25_000),
+            deadAfterMs: envMs('DSH_MT_DEAD_AFTER_MS', 75_000),
+            networkWatchMs: envMs('DSH_MT_NETWORK_WATCH_MS', 10_000),
             ...(this.deps.log ? { log: this.deps.log } : {}),
             onStatusChange: (status) => {
                 if (status === 'online') {

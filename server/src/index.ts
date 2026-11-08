@@ -23,6 +23,12 @@ async function main(): Promise<void> {
     authConfig: config.auth,
     apkDir: config.apkDir,
     allowTunnelBearer: config.allowTunnelBearer,
+    tunnelOptions: {
+      heartbeatSec: config.tunnel.heartbeatSec,
+      offlineSec: config.tunnel.offlineSec,
+      reconnectGraceSec: config.tunnel.reconnectGraceSec,
+      seenThrottleSec: config.tunnel.seenThrottleSec,
+    },
     logger: true,
   });
 

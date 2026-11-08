@@ -99,8 +99,14 @@ void main() {
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('离线PC'));
+    await tester.pump();
+    // 离线点击不再立刻放弃：先提示重试，并自动轮询最多约 20 秒
+    expect(find.textContaining('正在尝试连接'), findsOneWidget);
+    expect(opened, isNull);
+
+    // 推进重试计时器（6 次 × 3 秒）直到结束
+    await tester.pump(const Duration(seconds: 21));
     await tester.pumpAndSettle();
-    expect(find.textContaining('当前离线'), findsOneWidget);
     expect(opened, isNull);
 
     await tester.tap(find.text('在线PC'));

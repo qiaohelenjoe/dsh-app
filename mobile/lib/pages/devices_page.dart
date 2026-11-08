@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter_svg/flutter_svg.dart';
 
 import '../api.dart';
 import '../session_store.dart';
@@ -31,25 +30,45 @@ class DevicesPage extends StatefulWidget {
   State<DevicesPage> createState() => _DevicesPageState();
 }
 
-class _DevicesPageState extends State<DevicesPage> {
+class _DevicesPageState extends State<DevicesPage> with WidgetsBindingObserver {
   late Session _session = widget.session;
   List<DeviceInfo> _devices = const [];
   bool _loading = true;
   String? _error;
   Timer? _pollTimer;
+  bool _retrying = false;
+  AppLifecycleState _lifecycle = AppLifecycleState.resumed;
+
+  /// 前台 10 秒、后台 30 秒：前台更实时，后台省电。
+  Duration get _pollInterval =>
+      _lifecycle == AppLifecycleState.resumed ? const Duration(seconds: 10) : const Duration(seconds: 30);
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _load();
-    // 设备在线状态由桌面隧道心跳决定，进入列表后定期刷新，避免展示过期状态
-    _pollTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+    _startPolling();
+  }
+
+  void _startPolling() {
+    _pollTimer?.cancel();
+    _pollTimer = Timer.periodic(_pollInterval, (_) {
       if (!_loading) _load();
     });
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == _lifecycle) return;
+    _lifecycle = state;
+    _startPolling();
+    if (state == AppLifecycleState.resumed && !_loading) _load();
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _pollTimer?.cancel();
     super.dispose();
   }
@@ -80,7 +99,8 @@ class _DevicesPageState extends State<DevicesPage> {
     } catch (error) {
       if (!mounted) return;
       setState(() {
-        _error = '加载设备失败：$error';
+        // 区分手机自身网络异常与设备离线：网络异常保留刚才的列表，等症状消失自动恢复
+        _error = '网络异常，正在自动重试…';
         _loading = false;
       });
     }
@@ -121,21 +141,42 @@ class _DevicesPageState extends State<DevicesPage> {
       widget.onOpenDevice(device, _session);
       return;
     }
+    if (_retrying) return;
     // 列表可能是旧快照（隧道刚重连）：先刷新一次再判断
     await _load();
     if (!mounted) return;
-    DeviceInfo? fresh;
-    for (final item in _devices) {
-      if (item.id == device.id) {
-        fresh = item;
-        break;
-      }
-    }
+    DeviceInfo? fresh = _findDevice(device.id);
     if (fresh != null && fresh.online) {
       widget.onOpenDevice(fresh, _session);
       return;
     }
-    _showMessage('${device.name} 当前离线，请确认电脑已开机');
+    // 网络抖动时隧道可能几秒内恢复：自动重试最多约 20 秒，避免用户看到"离线"就直接放弃
+    _retrying = true;
+    _showMessage('${device.name} 当前离线，正在尝试连接…');
+    try {
+      for (var attempt = 0; attempt < 6; attempt += 1) {
+        await Future<void>.delayed(const Duration(seconds: 3));
+        if (!mounted) return;
+        await _load();
+        if (!mounted) return;
+        fresh = _findDevice(device.id);
+        if (fresh != null && fresh.online) {
+          widget.onOpenDevice(fresh, _session);
+          return;
+        }
+      }
+      if (!mounted) return;
+      _showMessage('${device.name} 仍处于离线，请确认电脑网络与 DSH 是否正常');
+    } finally {
+      _retrying = false;
+    }
+  }
+
+  DeviceInfo? _findDevice(String id) {
+    for (final item in _devices) {
+      if (item.id == id) return item;
+    }
+    return null;
   }
 
   Future<void> _showDeviceMenu(DeviceInfo device) async {
@@ -344,9 +385,9 @@ class _DevicesPageState extends State<DevicesPage> {
     }
     if (_devices.isEmpty) {
       return ListView(
-        children: [
-          const SizedBox(height: 8),
-          const Padding(
+        children: const [
+          SizedBox(height: 8),
+          Padding(
             padding: EdgeInsets.fromLTRB(20, 64, 20, 0),
             child: Column(
               children: [
@@ -387,6 +428,18 @@ class _DevicesPageState extends State<DevicesPage> {
       ],
     );
   }
+}
+
+/// 离线时显示「最后在线 x 分钟前」，比单纯「离线」更有信息量。
+String? _lastSeenText(DeviceInfo device) {
+  if (device.online) return null;
+  final lastSeen = device.lastSeenAt;
+  if (lastSeen == null) return null;
+  final diff = DateTime.now().difference(lastSeen);
+  if (diff.inMinutes < 1) return '最后在线 刚刚';
+  if (diff.inHours < 1) return '最后在线 ${diff.inMinutes} 分钟前';
+  if (diff.inDays < 1) return '最后在线 ${diff.inHours} 小时前';
+  return '最后在线 ${diff.inDays} 天前';
 }
 
 /// 单台设备卡片：描边圆角卡，在线用绿点、离线用灰点。
@@ -441,7 +494,11 @@ class _DeviceCard extends StatelessWidget {
                     ),
                     const SizedBox(height: 3),
                     Text(
-                      '${device.platformLabel} · 电脑',
+                      [
+                        device.platformLabel,
+                        '电脑',
+                        if (_lastSeenText(device) != null) _lastSeenText(device)!,
+                      ].join(' · '),
                       style: const TextStyle(color: DshTheme.fgDim, fontSize: 12),
                     ),
                   ],
