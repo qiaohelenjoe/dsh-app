@@ -183,14 +183,60 @@ export async function requestTunnelTicket(
   serverBaseUrl: string,
   accessToken: string,
   fetchImpl: typeof fetch = fetch,
+  deviceId?: string,
 ): Promise<string> {
-  const response = await postJson(fetchImpl, apiUrl(serverBaseUrl, '/v1/tunnel/ticket'), {}, accessToken);
+  const response = await postJson(
+    fetchImpl,
+    apiUrl(serverBaseUrl, '/v1/tunnel/ticket'),
+    deviceId ? { deviceId } : {},
+    accessToken,
+  );
   if (response.status !== 200) {
     throw new Error(`申请隧道票据失败（HTTP ${response.status}）：${await response.text()}`);
   }
   const body = (await response.json()) as { ticket?: string };
   if (!body.ticket) throw new Error('申请隧道票据失败：响应缺少 ticket');
   return body.ticket;
+}
+
+export interface DeviceSessionTokens {
+  accessToken: string;
+  refreshToken: string;
+  deviceId: string;
+  expiresIn: number;
+}
+
+/**
+ * 用账号级会话为某台设备换取**设备会话**。
+ *
+ * 面板登录拿到的是网页会话（无设备），不能直接申请隧道票据、刷新频率也低；
+ * 登记设备后用本接口换一条绑定该设备的会话，隧道才能长期稳定重连。
+ */
+export async function requestDeviceSession(
+  serverBaseUrl: string,
+  accessToken: string,
+  deviceId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<DeviceSessionTokens> {
+  const response = await postJson(
+    fetchImpl,
+    apiUrl(serverBaseUrl, `/v1/devices/${encodeURIComponent(deviceId)}/session`),
+    {},
+    accessToken,
+  );
+  if (response.status !== 200) {
+    throw new Error(`换取设备会话失败（HTTP ${response.status}）：${await response.text()}`);
+  }
+  const body = (await response.json()) as Partial<DeviceSessionTokens>;
+  if (!body.accessToken || !body.refreshToken || !body.deviceId) {
+    throw new Error('换取设备会话失败：响应缺少令牌');
+  }
+  return {
+    accessToken: body.accessToken,
+    refreshToken: body.refreshToken,
+    deviceId: body.deviceId,
+    expiresIn: body.expiresIn ?? 0,
+  };
 }
 
 /** 完整设备码登录：申请 → 打开浏览器 → 轮询 → 生成密钥 → 登记设备。 */

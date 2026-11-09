@@ -2,7 +2,7 @@ import { appendFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
-import { loginWithDeviceCode, refreshTokens, requestTunnelTicket, } from './auth.js';
+import { generateDeviceKeys, loginWithDeviceCode, refreshTokens, registerDevice, requestDeviceSession, requestTunnelTicket, } from './auth.js';
 import { createLocalDshForwarder, LaunchTokenCookieProvider, } from './dsh-credentials.js';
 import { TunnelClient } from './tunnel.js';
 /** mux 连接生命周期日志路径：DSH 不落盘 `[api-gateway]` 输出，排障只能靠插件侧记录。 */
@@ -109,6 +109,84 @@ export class TunnelAgent {
             return this.state;
         }
     }
+    /**
+     * 用「移动端」面板的登录会话把本机登记为受控设备，并启动隧道。
+     *
+     * 面板登录（邮箱+密码）只建网页会话、不登记设备；多台电脑要各自出现在手机的
+     * 设备列表里，必须在登录后把本机登记成独立设备。幂等：同名同平台已存在则复用。
+     */
+    async adoptPanelSession(session) {
+        const fetchImpl = this.deps.fetchImpl ?? fetch;
+        const base = this.config.serverBaseUrl.replace(/\/$/, '');
+        this.stopped = false;
+        const resolveDevice = async (preferStored) => {
+            const stored = await this.deps.store.load();
+            if (preferStored && stored && stored.deviceId && stored.accountEmail === session.email) {
+                return {
+                    deviceId: stored.deviceId,
+                    keys: {
+                        signPublicKey: stored.signPublicKey,
+                        ecdhPublicKey: stored.ecdhPublicKey,
+                        signPrivateKeyPem: stored.signPrivateKeyPem,
+                        ecdhPrivateKeyPem: stored.ecdhPrivateKeyPem,
+                    },
+                    reused: true,
+                };
+            }
+            const listResponse = await fetchImpl(`${base}/v1/devices`, {
+                headers: { authorization: `Bearer ${session.accessToken}` },
+            }).catch(() => null);
+            const devices = listResponse && listResponse.ok
+                ? (await listResponse.json()).devices ?? []
+                : [];
+            const existing = devices.find((device) => device.kind === 'desktop' &&
+                device.platform === this.config.platform &&
+                device.name === this.config.deviceName);
+            if (existing) {
+                // 复用已有设备时拿不到私钥（服务端只存公钥）；隧道握手只用 deviceId，不影响连接
+                return {
+                    deviceId: existing.id,
+                    keys: { signPublicKey: '', ecdhPublicKey: '', signPrivateKeyPem: '', ecdhPrivateKeyPem: '' },
+                    reused: true,
+                };
+            }
+            const keys = generateDeviceKeys();
+            const device = await registerDevice({
+                serverBaseUrl: this.config.serverBaseUrl,
+                accessToken: session.accessToken,
+                deviceName: this.config.deviceName,
+                platform: this.config.platform,
+                keys,
+                fetchImpl,
+            });
+            return { deviceId: device.id, keys, reused: false };
+        };
+        let resolved = await resolveDevice(true);
+        let tokens;
+        try {
+            // 面板会话是网页会话（无设备），不能长期直接用于隧道：换一条绑定该设备的会话
+            tokens = await requestDeviceSession(this.config.serverBaseUrl, session.accessToken, resolved.deviceId, fetchImpl);
+        }
+        catch (error) {
+            // 本地记着的设备可能已在手机端被移除：忽略旧凭据，按名称复用或重新登记一台
+            if (!/HTTP 403/.test(String(error.message)))
+                throw error;
+            resolved = await resolveDevice(false);
+            tokens = await requestDeviceSession(this.config.serverBaseUrl, session.accessToken, resolved.deviceId, fetchImpl);
+        }
+        this.credentials = {
+            deviceId: resolved.deviceId,
+            accessToken: tokens.accessToken,
+            refreshToken: tokens.refreshToken,
+            accountEmail: session.email,
+            ...resolved.keys,
+        };
+        await this.deps.store.save(this.credentials);
+        this.tunnel?.stop();
+        this.tunnel = null;
+        this.startTunnel();
+        return { deviceId: resolved.deviceId, reused: resolved.reused, online: this.getTunnelDiagnostics()?.online ?? false };
+    }
     async logout() {
         this.tunnel?.sendOfflineAndStop();
         this.tunnel = null;
@@ -169,7 +247,7 @@ export class TunnelAgent {
             openLocalWebSocket: (input) => this.openLocalWebSocket(input, cookieProvider),
             getTunnelTicket: async (accessToken) => {
                 try {
-                    return await requestTunnelTicket(this.config.serverBaseUrl, accessToken, fetchImpl);
+                    return await requestTunnelTicket(this.config.serverBaseUrl, accessToken, fetchImpl, this.credentials?.deviceId);
                 }
                 catch (error) {
                     this.deps.log?.(`[agent] 申请隧道票据失败：${error.message}`);

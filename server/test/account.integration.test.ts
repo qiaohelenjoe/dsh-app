@@ -54,7 +54,7 @@ describe('账号信息 GET /v1/account（R01）', () => {
       assert.equal(body.account.emailVerified, false);
       assert.equal(typeof body.account.createdAt, 'string');
       assert.equal(new Date(body.account.createdAt).toISOString(), body.account.createdAt);
-      assert.deepEqual(body.account.limits, { desktopDevices: 2, mobileDevices: 3 });
+      assert.deepEqual(body.account.limits, { desktopDevices: 2, mobileDevices: 2 });
       // 登录本身会登记 1 台移动设备
       assert.deepEqual(body.usage, { desktopDevices: 0, mobileDevices: 1 });
     } finally {

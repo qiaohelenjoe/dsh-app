@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { AuthService } from '../auth/service.js';
 import type { DeviceService, RequestContext } from '../devices/service.js';
 import type { createAuthGuard } from './auth-guard.js';
 import { requireIdentity } from './auth-guard.js';
@@ -7,6 +8,7 @@ import { deviceIdParamsSchema, registerDeviceSchema, renameDeviceSchema } from '
 export interface DeviceRouteDeps {
   devices: DeviceService;
   guard: ReturnType<typeof createAuthGuard>;
+  auth: AuthService;
 }
 
 function requestContext(request: FastifyRequest): RequestContext {
@@ -42,5 +44,16 @@ export function registerDeviceRoutes(app: FastifyInstance, deps: DeviceRouteDeps
     const { id } = deviceIdParamsSchema.parse(request.params);
     await deps.devices.revoke(identity.accountId, id, requestContext(request));
     return reply.code(204).send();
+  });
+
+  /**
+   * 用账号会话为本账号的一台设备换取设备会话（面板登录后建立隧道用）。
+   * 校验设备归属，签发只绑定该设备的新会话；网页会话本身权限不外溢。
+   */
+  app.post('/v1/devices/:id/session', { preHandler: deps.guard }, async (request, reply) => {
+    const identity = requireIdentity(request);
+    const { id } = deviceIdParamsSchema.parse(request.params);
+    const result = await deps.auth.issueDeviceSession(identity, id, requestContext(request));
+    return reply.code(200).send(result);
   });
 }

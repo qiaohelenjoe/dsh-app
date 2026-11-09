@@ -138,7 +138,11 @@ export function apply(ctx, config = {}) {
     // 面板的服务端地址/下载页地址都由配置下发，市场版换服务器只需改插件配置。
     const panelApiBase = resolved.serverBaseUrl.replace(/\/+$/, '');
     let agentRef = null;
-    registerPanelSessionRoutes(ctx, new PanelSessionStore(resolved.panelSessionPath), { apiBase: panelApiBase, downloadUrl: `${panelApiBase}/download` }, (message) => log(ctx, message), () => agentRef?.getTunnelDiagnostics() ?? null);
+    registerPanelSessionRoutes(ctx, new PanelSessionStore(resolved.panelSessionPath), { apiBase: panelApiBase, downloadUrl: `${panelApiBase}/download` }, (message) => log(ctx, message), () => agentRef?.getTunnelDiagnostics() ?? null, (session) => {
+        if (!agentRef)
+            return Promise.reject(new Error('插件尚未就绪'));
+        return agentRef.adoptPanelSession(session);
+    });
     if (process.env.DSH_MOBILE_TUNNEL_DEBUG === '1') {
         try {
             appendFileSync(join(tmpdir(), 'dsh-mobile-tunnel-debug.log'), `${new Date().toISOString()} apply: base=${dshBaseUrl} hasConnection=${Boolean(getHostService(ctx, 'connection'))} hasWebServer=${Boolean(getHostService(ctx, 'webServer'))}\n`);

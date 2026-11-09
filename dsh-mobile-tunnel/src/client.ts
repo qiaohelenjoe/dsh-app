@@ -82,6 +82,29 @@ interface Session {
 
 /** 宿主机接口：会话落到插件数据文件，跨 DSH 重启有效（端口变化也不受影响）。 */
 const SESSION_ROUTE = '/plugins/dsh-mobile-tunnel/panel-session';
+/** 面板登录后把本机登记为受控设备（面板登录本身不登记设备）。 */
+const REGISTER_DEVICE_ROUTE = '/plugins/dsh-mobile-tunnel/register-device';
+
+let deviceRegistrationRequested = false;
+
+/**
+ * 面板登录后告知宿主：把本机登记为受控设备并启动隧道。
+ * 幂等（宿主侧同名同平台复用），失败不打扰用户（面板展示形式保持不变）。
+ */
+async function ensureHostDeviceRegistered(): Promise<void> {
+  if (deviceRegistrationRequested) return;
+  deviceRegistrationRequested = true;
+  try {
+    const response = await fetch(REGISTER_DEVICE_ROUTE, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+    if (!response.ok) deviceRegistrationRequested = false;
+  } catch {
+    deviceRegistrationRequested = false;
+  }
+}
 
 function normalizeSession(value: unknown): Session | null {
   if (typeof value !== 'object' || value === null) return null;
@@ -227,6 +250,7 @@ function createPanel(): Controller {
 
     sub.textContent = session ? session.email : '登录后手机可远程打开这台电脑的 DSH';
     if (session) {
+      void ensureHostDeviceRegistered();
       renderAccount(card, session);
       renderDownload(card);
     } else {
@@ -344,6 +368,7 @@ function createPanel(): Controller {
           refreshToken: loggedIn.body.refreshToken,
           email: emailValue,
         });
+        void ensureHostDeviceRegistered();
         void render();
       } catch (requestError) {
         error.textContent = `网络错误：${(requestError as Error).message}`;

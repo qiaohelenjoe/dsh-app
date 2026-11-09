@@ -125,13 +125,13 @@ describe('设备 API（T03）', () => {
     }
   });
 
-  test('移动端超过 3 台返回 403 authz.device_quota_exceeded', async () => {
+  test('移动端超过 2 台返回 403 authz.device_quota_exceeded', async () => {
     const ctx = await createAuthTestContext();
     try {
       await registerAccount(ctx);
       const session = await loginAccount(ctx); // 登录自带 1 台移动设备
 
-      for (let index = 2; index <= 3; index += 1) {
+      for (let index = 2; index <= 2; index += 1) {
         const response = await ctx.app.inject({
           method: 'POST',
           url: '/v1/devices',
@@ -145,7 +145,7 @@ describe('设备 API（T03）', () => {
         method: 'POST',
         url: '/v1/devices',
         headers: authHeader(session),
-        payload: devicePayload('手机-4', 'android'),
+        payload: devicePayload('手机-3', 'android'),
       });
       assert.equal(overflow.statusCode, 403);
       assert.equal((overflow.json() as ErrorBody).error.code, 'authz.device_quota_exceeded');

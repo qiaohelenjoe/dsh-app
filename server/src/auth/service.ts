@@ -35,6 +35,7 @@ import {
   rotateSessionRefresh,
 } from './repositories/sessions.js';
 import type { Mailer } from './mailer.js';
+import { findDeviceById } from '../devices/repositories.js';
 
 const PASSWORD_RESET_TTL_MS = 30 * 60 * 1000;
 
@@ -321,6 +322,59 @@ export class AuthService {
       accessToken,
       refreshToken: nextRefresh.token,
       expiresIn: this.config.accessTokenTtlSeconds,
+    };
+  }
+
+  /**
+   * 用账号级会话（网页/面板登录）为**本账号的一台设备**签发设备会话。
+   *
+   * 用途：面板登录本身不绑定设备，但插件把本机登记成设备后需要一条设备会话才能
+   * 申请隧道票据、建立隧道。这里校验设备归属后签发，网页会话本身权限不外溢。
+   */
+  async issueDeviceSession(
+    identity: { accountId: string; sessionId: string },
+    deviceId: string,
+    context: RequestContext,
+  ): Promise<TokenPair & { deviceId: string }> {
+    const device = await findDeviceById(this.pool, deviceId);
+    if (!device || device.account_id !== identity.accountId || device.revoked_at !== null) {
+      throw new ApiError(403, 'authz.forbidden', '设备不属于当前账号');
+    }
+    const account = await findAccountById(this.pool, identity.accountId);
+    if (!account || account.status !== 'active') {
+      throw new ApiError(403, 'authz.account_suspended', '账号已停用');
+    }
+
+    const sessionId = randomUuid();
+    const nextRefresh = generateRefreshToken(sessionId);
+    await createSession(this.pool, {
+      id: sessionId,
+      accountId: identity.accountId,
+      deviceId,
+      refreshTokenHash: hashRefreshSecret(nextRefresh.secret, this.config.refreshPepper),
+      expiresAt: refreshTokenExpiry(this.config.refreshTokenTtlDays),
+      ip: context.ip,
+      userAgent: context.userAgent,
+    });
+    const accessToken = await signAccessToken(
+      { accountId: identity.accountId, sessionId },
+      this.config.jwtSecret,
+      this.config.accessTokenTtlSeconds,
+    );
+    await writeAudit(this.pool, {
+      accountId: identity.accountId,
+      deviceId,
+      action: 'auth.device_session.success',
+      result: 'ok',
+      ip: context.ip,
+      userAgent: context.userAgent,
+      detail: { sessionId, via: 'panel' },
+    });
+    return {
+      accessToken,
+      refreshToken: nextRefresh.token,
+      expiresIn: this.config.accessTokenTtlSeconds,
+      deviceId,
     };
   }
 

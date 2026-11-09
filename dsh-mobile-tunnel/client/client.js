@@ -25,7 +25,7 @@ window.__ModuleLoader__.load({
 		const HIDDEN_FLAG = 'data-dshmf-hidden';
 		const PANEL_ID = 'dsh-mobile-files-panel';
 		const STYLE_ID = 'dsh-mobile-files-style';
-		const PANEL_VERSION = '1.1.1';
+		const PANEL_VERSION = '1.1.5';
 		const BASE = '/plugins/dsh-mobile-tunnel';
 		const DIAG_ROUTE = BASE + '/diag';
 		const ROOTS_ROUTE = BASE + '/fs-roots';
@@ -906,6 +906,30 @@ window.__ModuleLoader__.load({
 		`;
 		/** 宿主机接口：会话落到插件数据文件，跨 DSH 重启有效（端口变化也不受影响）。 */
 		const SESSION_ROUTE = '/plugins/dsh-mobile-tunnel/panel-session';
+		/** 面板登录后把本机登记为受控设备（面板登录本身不登记设备）。 */
+		const REGISTER_DEVICE_ROUTE = '/plugins/dsh-mobile-tunnel/register-device';
+		let deviceRegistrationRequested = false;
+		/**
+		 * 面板登录后告知宿主：把本机登记为受控设备并启动隧道。
+		 * 幂等（宿主侧同名同平台复用），失败不打扰用户（面板展示形式保持不变）。
+		 */
+		async function ensureHostDeviceRegistered() {
+		    if (deviceRegistrationRequested)
+		        return;
+		    deviceRegistrationRequested = true;
+		    try {
+		        const response = await fetch(REGISTER_DEVICE_ROUTE, {
+		            method: 'POST',
+		            headers: { 'content-type': 'application/json' },
+		            body: '{}',
+		        });
+		        if (!response.ok)
+		            deviceRegistrationRequested = false;
+		    }
+		    catch {
+		        deviceRegistrationRequested = false;
+		    }
+		}
 		function normalizeSession(value) {
 		    if (typeof value !== 'object' || value === null)
 		        return null;
@@ -1049,6 +1073,7 @@ window.__ModuleLoader__.load({
 		            return;
 		        sub.textContent = session ? session.email : '登录后手机可远程打开这台电脑的 DSH';
 		        if (session) {
+		            void ensureHostDeviceRegistered();
 		            renderAccount(card, session);
 		            renderDownload(card);
 		        }
@@ -1162,6 +1187,7 @@ window.__ModuleLoader__.load({
 		                    refreshToken: loggedIn.body.refreshToken,
 		                    email: emailValue,
 		                });
+		                void ensureHostDeviceRegistered();
 		                void render();
 		            }
 		            catch (requestError) {

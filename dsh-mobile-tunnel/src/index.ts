@@ -170,6 +170,10 @@ export function apply(ctx: DshHostContext, config: Partial<PluginConfig> = {}): 
     { apiBase: panelApiBase, downloadUrl: `${panelApiBase}/download` },
     (message) => log(ctx, message),
     () => agentRef?.getTunnelDiagnostics() ?? null,
+    (session) => {
+      if (!agentRef) return Promise.reject(new Error('插件尚未就绪'));
+      return agentRef.adoptPanelSession(session);
+    },
   );
   if (process.env.DSH_MOBILE_TUNNEL_DEBUG === '1') {
     try {

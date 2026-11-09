@@ -82,7 +82,7 @@ cd deploy && cp .env.example .env && docker compose up -d --build
 
 ## 账号面板与 App 下载
 
-- 面板登录走 `POST /v1/auth/panel-login`（邮箱 + 密码）：只建会话、**不登记设备**，因此不占设备配额、也不会出现在设备列表里
+- 面板登录走 `POST /v1/auth/panel-login`（邮箱 + 密码）：服务端只建会话、不登记设备；1.1.2 起插件在登录成功后自动调用 `POST /plugins/dsh-mobile-tunnel/register-device` 把**本机**登记为受控设备（同名同平台复用），因此每台电脑都会作为独立设备出现在手机列表里
 - 会话持久化：插件在 DSH 本机 Web 服务注册 `GET/POST/DELETE /plugins/dsh-mobile-tunnel/panel-session`，数据存 `~/.dsh/dsh-mobile-account-panel.json`（0600）；浏览器存储只作接口不可用时的兜底
 - 面板登录后展示：账号信息、配额、设备列表、App 下载二维码（内容 `https://dsh.hbzxht.com/download`，中间黑色鲸鱼 logo）与下载链接
 - 二维码离线生成：改下载地址或换 logo 后执行 `cd dsh-mobile-tunnel && npm run gen:qr` 重新生成 `src/app-qr.ts`，再 `npm run build`
@@ -110,3 +110,12 @@ cd deploy && cp .env.example .env && docker compose up -d --build
 - 移动端真机安装、3 秒首屏、折叠屏实物切换待真机验证（平台发布计划见 README「版本规划」）
 - 隧道票据为单实例内存实现（规格 §12 允许），多实例需改共享存储
 - 移动端 release 签名读取 `mobile/android/key.properties`（模板 `key.properties.example`，文件已在忽略列表）；未提供时回退 debug 签名，只能自测、不能分发
+
+## 多设备与配额（1.1.5+）
+
+- 每台电脑在「移动端」面板登录后，插件自动把本机登记为独立受控设备并启动隧道（同名同平台复用，不重复占额度）；手机设备列表按 `kind=desktop` 只显示可连接的电脑，点哪台连哪台。
+- 设备配额按账号配置：桌面默认 **2** 台、移动默认 **2** 台（`accounts.desktop_device_limit` / `mobile_device_limit`；迁移 0005 起移动端默认 2）。配额满时登记返回 `403 authz.device_quota_exceeded`，面板显示具体原因。
+- 面板登录（`/v1/auth/panel-login`）只建网页会话、不登记设备；登记由宿主接口 `POST /plugins/dsh-mobile-tunnel/register-device` 完成（仅本机同源可调）。
+- 登记后插件调用 `POST /v1/devices/:id/session` 换一条**绑定该设备**的会话再建隧道：网页会话 access token 只有 15 分钟且刷新有限流，直接拿来跑隧道会反复 `no-ticket` 掉线。
+- 换会话返回 `403`（设备已在手机端移除/撤销）时，插件忽略旧凭据、按名称复用或重新登记一台，再换会话（1.1.5+）。
+- 隧道票据 `POST /v1/tunnel/ticket` 允许带 `{ deviceId }`：网页会话必须带且设备需属于本账号；设备会话不带则用会话自身的设备。
