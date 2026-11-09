@@ -1,5 +1,0 @@
-# 安装到 DSH profile 的 cordis.patch.yml 时追加该条目（示例）：
-# 详见 server/README.md 与规格 §8
-- insert:
-    - id: mobile-tunnel
-      name: dsh-mobile-tunnel
