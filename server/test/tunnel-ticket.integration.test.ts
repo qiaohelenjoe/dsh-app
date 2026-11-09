@@ -13,6 +13,7 @@ import {
   loginAccount,
   makeTestAuthConfig,
   registerAccount,
+  TEST_PASSWORD,
   type AccountSession,
 } from './helpers/auth.js';
 import { issueTunnelTicket, tunnelSocketUrl } from './helpers/tunnel.js';
@@ -179,6 +180,96 @@ describe('隧道一次性票据（R06）', () => {
       assert.match(body.ticket, /^tk_/);
       assert.ok(body.ticket.length > 40);
       assert.equal(body.expiresIn, 60);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  test('网页会话带本账号 deviceId 可签发票据；缺 deviceId 或他人设备返回 403', async () => {
+    const ctx = await createTicketContext();
+    try {
+      // 网页会话：panel-login 不绑定设备
+      const web = await ctx.app.inject({
+        method: 'POST',
+        url: '/v1/auth/panel-login',
+        payload: { email: ctx.session.email, password: TEST_PASSWORD },
+      });
+      assert.equal(web.statusCode, 200);
+      const tokens = web.json() as { accessToken: string };
+      const webHeaders = { authorization: `Bearer ${tokens.accessToken}` };
+
+      const missing = await ctx.app.inject({ method: 'POST', url: '/v1/tunnel/ticket', headers: webHeaders });
+      assert.equal(missing.statusCode, 403);
+
+      const own = await ctx.app.inject({
+        method: 'POST',
+        url: '/v1/tunnel/ticket',
+        headers: webHeaders,
+        payload: { deviceId: ctx.session.deviceId },
+      });
+      assert.equal(own.statusCode, 200);
+      assert.match((own.json() as { ticket: string }).ticket, /^tk_/);
+
+      // 另一个账号的设备
+      await registerAccount(ctx, 'other@example.com');
+      const other = await loginAccount(ctx, { email: 'other@example.com' });
+      const foreign = await ctx.app.inject({
+        method: 'POST',
+        url: '/v1/tunnel/ticket',
+        headers: webHeaders,
+        payload: { deviceId: other.deviceId },
+      });
+      assert.equal(foreign.statusCode, 403);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  test('设备会话带不同 deviceId 时返回 403', async () => {
+    const ctx = await createTicketContext();
+    try {
+      await registerAccount(ctx, 'second@example.com');
+      const other = await loginAccount(ctx, { email: 'second@example.com' });
+      const mismatch = await ctx.app.inject({
+        method: 'POST',
+        url: '/v1/tunnel/ticket',
+        headers: authHeader(ctx.session),
+        payload: { deviceId: other.deviceId },
+      });
+      assert.equal(mismatch.statusCode, 403);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+
+  test('账号会话可为本账号设备换取设备会话，并直接用该会话签发票据', async () => {
+    const ctx = await createTicketContext();
+    try {
+      const exchange = await ctx.app.inject({
+        method: 'POST',
+        url: `/v1/devices/${ctx.session.deviceId}/session`,
+        headers: authHeader(ctx.session),
+      });
+      assert.equal(exchange.statusCode, 200);
+      const tokens = exchange.json() as { accessToken: string; refreshToken: string; deviceId: string };
+      assert.equal(tokens.deviceId, ctx.session.deviceId);
+
+      const ticket = await ctx.app.inject({
+        method: 'POST',
+        url: '/v1/tunnel/ticket',
+        headers: { authorization: `Bearer ${tokens.accessToken}` },
+      });
+      assert.equal(ticket.statusCode, 200);
+
+      await registerAccount(ctx, 'third@example.com');
+      const other = await loginAccount(ctx, { email: 'third@example.com' });
+      const foreign = await ctx.app.inject({
+        method: 'POST',
+        url: `/v1/devices/${other.deviceId}/session`,
+        headers: authHeader(ctx.session),
+      });
+      assert.equal(foreign.statusCode, 403);
     } finally {
       await ctx.close();
     }

@@ -280,6 +280,28 @@ DELETE /v1/devices/dev_a
 
 > 撤销后该设备的 access/refresh 立即失效。
 
+### 2.5 换取设备会话（面板登录后建隧道）
+
+```http
+POST /v1/devices/dev_a/session
+Authorization: Bearer <access_token>   # 账号会话（网页/面板登录）或设备会话均可
+```
+
+响应 `200`：
+
+```json
+{
+  "accessToken": "eyJ...",
+  "refreshToken": "rt_...",
+  "expiresIn": 900,
+  "deviceId": "dev_a"
+}
+```
+
+行为：校验设备属于当前账号且未撤销，然后签发一条**绑定该设备**的新会话；网页会话本身权限不外溢。
+用途：PC 端「移动端」面板登录后自动把本机登记为设备，再用本接口换设备会话建立隧道（设备会话刷新频率正常，适合长期隧道）。
+错误：`403 authz.forbidden`（设备不存在/不属于当前账号/已撤销）、`403 authz.account_suspended`。
+
 ---
 
 ## 3. 隧道（桌面端）

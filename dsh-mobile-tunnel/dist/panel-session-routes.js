@@ -25,6 +25,11 @@ export const DIAG_ROUTE = '/plugins/dsh-mobile-tunnel/diag';
 export const DIAG_LOG = join(homedir(), '.dsh', 'dsh-mobile-tunnel-diag.log');
 /** 只读隧道状态（真连接状态、最后帧时间、重连次数、最近失败原因），排障用。 */
 export const TUNNEL_STATUS_ROUTE = '/plugins/dsh-mobile-tunnel/tunnel-status';
+/**
+ * 面板登录后把本机登记为受控设备（面板登录本身只建网页会话）。
+ * 幂等：同名同平台设备已存在时复用。
+ */
+export const REGISTER_DEVICE_ROUTE = '/plugins/dsh-mobile-tunnel/register-device';
 async function handleDiag(req, res) {
     if (req.method !== 'POST') {
         let text = '';
@@ -70,6 +75,71 @@ async function handleTunnelStatus(req, res, getDiagnostics) {
     }
     catch (error) {
         sendJson(res, 500, { error: String(error.message) });
+    }
+}
+/** 面板会话过期时用 refreshToken 换新会话并落盘；失败返回 null。 */
+async function refreshPanelSession(store, session, apiBase) {
+    try {
+        const response = await fetch(`${apiBase.replace(/\/+$/, '')}/v1/auth/refresh`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ refreshToken: session.refreshToken }),
+        });
+        if (!response.ok)
+            return null;
+        const body = (await response.json());
+        if (!body.accessToken || !body.refreshToken)
+            return null;
+        const next = { accessToken: body.accessToken, refreshToken: body.refreshToken, email: session.email };
+        await store.save(next);
+        return next;
+    }
+    catch {
+        return null;
+    }
+}
+async function handleRegisterDevice(req, res, store, apiBase, adopt) {
+    if (!sameOrigin(req)) {
+        sendJson(res, 403, { error: 'origin-rejected' });
+        return;
+    }
+    if (req.method !== 'POST') {
+        sendJson(res, 405, { error: 'method-not-allowed' });
+        return;
+    }
+    if (!adopt) {
+        sendJson(res, 503, { error: 'unavailable' });
+        return;
+    }
+    let session = await store.load();
+    if (!session) {
+        sendJson(res, 401, { error: 'not-logged-in' });
+        return;
+    }
+    try {
+        const result = await adopt(session);
+        sendJson(res, 200, { ok: true, ...result });
+    }
+    catch (error) {
+        const message = String(error.message ?? error);
+        // 面板会话过期：刷新一次后重试（面板本身也会在打开时刷新，这里兜底）
+        if (!/HTTP 401|token_expired|token_invalid/.test(message)) {
+            sendJson(res, 400, { error: message });
+            return;
+        }
+        const refreshed = await refreshPanelSession(store, session, apiBase);
+        if (!refreshed) {
+            sendJson(res, 401, { error: 'session-expired', message });
+            return;
+        }
+        session = refreshed;
+        try {
+            const result = await adopt(session);
+            sendJson(res, 200, { ok: true, ...result });
+        }
+        catch (retryError) {
+            sendJson(res, 400, { error: String(retryError.message) });
+        }
     }
 }
 function latestWorkspaceContext() {
@@ -215,7 +285,7 @@ async function handle(req, res, store, publicConfig, log) {
  * 等宿主 `webServer` 就绪后注册路由（apply 可能早于该服务装配）。
  * 注册成功返回；宿主持久不可用则安静放弃，不影响隧道。
  */
-export function registerPanelSessionRoutes(ctx, store, publicConfig, log, getTunnelDiagnostics) {
+export function registerPanelSessionRoutes(ctx, store, publicConfig, log, getTunnelDiagnostics, adoptPanelDevice) {
     let disposed = false;
     let release;
     let retries = 0;
@@ -264,6 +334,15 @@ export function registerPanelSessionRoutes(ctx, store, publicConfig, log, getTun
             });
             if (typeof statusRegistered === 'function')
                 disposers.push(statusRegistered);
+            const registerDeviceRoute = webServer.register({
+                kind: 'exact',
+                path: REGISTER_DEVICE_ROUTE,
+                handler: (req, res) => {
+                    void handleRegisterDevice(req, res, store, publicConfig.apiBase, adoptPanelDevice);
+                },
+            });
+            if (typeof registerDeviceRoute === 'function')
+                disposers.push(registerDeviceRoute);
             const fsRoots = webServer.register({
                 kind: 'exact',
                 path: FS_ROOTS_ROUTE,

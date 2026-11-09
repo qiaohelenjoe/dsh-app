@@ -38,6 +38,12 @@ export const DIAG_LOG = join(homedir(), '.dsh', 'dsh-mobile-tunnel-diag.log');
 /** 只读隧道状态（真连接状态、最后帧时间、重连次数、最近失败原因），排障用。 */
 export const TUNNEL_STATUS_ROUTE = '/plugins/dsh-mobile-tunnel/tunnel-status';
 
+/**
+ * 面板登录后把本机登记为受控设备（面板登录本身只建网页会话）。
+ * 幂等：同名同平台设备已存在时复用。
+ */
+export const REGISTER_DEVICE_ROUTE = '/plugins/dsh-mobile-tunnel/register-device';
+
 async function handleDiag(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method !== 'POST') {
     let text = '';
@@ -91,6 +97,80 @@ interface WorkspaceContext {
   sessionId: string;
   workspaceDir: string;
   updatedAt: number;
+}
+
+/** 面板会话过期时用 refreshToken 换新会话并落盘；失败返回 null。 */
+async function refreshPanelSession(
+  store: PanelSessionStore,
+  session: { accessToken: string; refreshToken: string; email: string },
+  apiBase: string,
+): Promise<{ accessToken: string; refreshToken: string; email: string } | null> {
+  try {
+    const response = await fetch(`${apiBase.replace(/\/+$/, '')}/v1/auth/refresh`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ refreshToken: session.refreshToken }),
+    });
+    if (!response.ok) return null;
+    const body = (await response.json()) as { accessToken?: string; refreshToken?: string };
+    if (!body.accessToken || !body.refreshToken) return null;
+    const next = { accessToken: body.accessToken, refreshToken: body.refreshToken, email: session.email };
+    await store.save(next);
+    return next;
+  } catch {
+    return null;
+  }
+}
+
+async function handleRegisterDevice(
+  req: IncomingMessage,
+  res: ServerResponse,
+  store: PanelSessionStore,
+  apiBase: string,
+  adopt?: (
+    session: { accessToken: string; refreshToken: string; email: string },
+  ) => Promise<{ deviceId: string; reused: boolean; online: boolean }>,
+): Promise<void> {
+  if (!sameOrigin(req)) {
+    sendJson(res, 403, { error: 'origin-rejected' });
+    return;
+  }
+  if (req.method !== 'POST') {
+    sendJson(res, 405, { error: 'method-not-allowed' });
+    return;
+  }
+  if (!adopt) {
+    sendJson(res, 503, { error: 'unavailable' });
+    return;
+  }
+  let session = await store.load();
+  if (!session) {
+    sendJson(res, 401, { error: 'not-logged-in' });
+    return;
+  }
+  try {
+    const result = await adopt(session);
+    sendJson(res, 200, { ok: true, ...result });
+  } catch (error) {
+    const message = String((error as Error).message ?? error);
+    // 面板会话过期：刷新一次后重试（面板本身也会在打开时刷新，这里兜底）
+    if (!/HTTP 401|token_expired|token_invalid/.test(message)) {
+      sendJson(res, 400, { error: message });
+      return;
+    }
+    const refreshed = await refreshPanelSession(store, session, apiBase);
+    if (!refreshed) {
+      sendJson(res, 401, { error: 'session-expired', message });
+      return;
+    }
+    session = refreshed;
+    try {
+      const result = await adopt(session);
+      sendJson(res, 200, { ok: true, ...result });
+    } catch (retryError) {
+      sendJson(res, 400, { error: String((retryError as Error).message) });
+    }
+  }
 }
 
 function latestWorkspaceContext(): WorkspaceContext | null {
@@ -262,6 +342,9 @@ export function registerPanelSessionRoutes(
   publicConfig: PanelPublicConfig,
   log: (message: string) => void,
   getTunnelDiagnostics?: () => unknown,
+  adoptPanelDevice?: (
+    session: { accessToken: string; refreshToken: string; email: string },
+  ) => Promise<{ deviceId: string; reused: boolean; online: boolean }>,
 ): void {
   let disposed = false;
   let release: (() => void) | undefined;
@@ -306,6 +389,14 @@ export function registerPanelSessionRoutes(
         },
       });
       if (typeof statusRegistered === 'function') disposers.push(statusRegistered as () => void);
+      const registerDeviceRoute = webServer.register({
+        kind: 'exact',
+        path: REGISTER_DEVICE_ROUTE,
+        handler: (req, res) => {
+          void handleRegisterDevice(req, res, store, publicConfig.apiBase, adoptPanelDevice);
+        },
+      });
+      if (typeof registerDeviceRoute === 'function') disposers.push(registerDeviceRoute as () => void);
       const fsRoots = webServer.register({
         kind: 'exact',
         path: FS_ROOTS_ROUTE,

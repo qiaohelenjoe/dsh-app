@@ -3,7 +3,7 @@ export type DeviceKind = 'desktop' | 'mobile';
 /** 规格 D5：单账号 20 桌面 / 10 移动端。 */
 export const DEVICE_QUOTAS: Record<DeviceKind, number> = {
   desktop: 2,
-  mobile: 3,
+  mobile: 2,
 };
 
 const MOBILE_PLATFORMS = new Set(['android', 'ios', 'harmony']);

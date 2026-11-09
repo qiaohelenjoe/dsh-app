@@ -123,7 +123,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   });
   registerAuthRoutes(app, { auth: authService, limiter, guard });
   registerWebLoginRoutes(app, { auth: authService, limiter, jwtSecret: options.authConfig.jwtSecret });
-  registerTunnelTicketRoutes(app, { registry: tunnelRegistry, guard });
+  registerTunnelTicketRoutes(app, { registry: tunnelRegistry, guard, pool: options.pool });
   registerAccountRoutes(app, { pool: options.pool, guard });
   registerClientLogRoutes(app, { pool: options.pool, guard, limiter });
   registerDownloadRoutes(app, { apkDir: options.apkDir ?? '/app/apk' });
@@ -135,7 +135,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   }, 6 * 60 * 60 * 1000);
   clientLogCleanup.unref?.();
   app.addHook('onClose', async () => clearInterval(clientLogCleanup));
-  registerDeviceRoutes(app, { devices: deviceService, guard });
+  registerDeviceRoutes(app, { devices: deviceService, guard, auth: authService });
   registerDeviceCodeRoutes(app, {
     deviceCode: deviceCodeService,
     guard,
