@@ -53,6 +53,7 @@ class DeviceInfo {
     required this.kind,
     required this.platform,
     required this.online,
+    this.machineName,
     this.lastSeenAt,
   });
 
@@ -61,6 +62,9 @@ class DeviceInfo {
   final String kind;
   final String platform;
   final bool online;
+
+  /// 计算机名称（设备身份；老设备未上报时为 null）。界面在非本机设备名后用括号显示。
+  final String? machineName;
   final DateTime? lastSeenAt;
 
   String get platformLabel {
@@ -88,6 +92,7 @@ class DeviceInfo {
         kind: (json['kind'] as String?) ?? 'desktop',
         platform: (json['platform'] as String?) ?? 'unknown',
         online: (json['online'] as bool?) ?? false,
+        machineName: json['machineName'] is String ? json['machineName'] as String : null,
         lastSeenAt: json['lastSeenAt'] is String ? DateTime.tryParse(json['lastSeenAt'] as String) : null,
       );
 }
@@ -321,12 +326,49 @@ class ApiClient {
     }
   }
 
-  Future<void> logout(String refreshToken) async {
-    await _client.post(
+  Future<void> logout(String refreshToken) async {    await _client.post(
       _uri('/v1/auth/logout'),
       headers: _jsonHeaders(),
       body: jsonEncode({'refreshToken': refreshToken}),
     );
+  }
+
+  /// 忘记密码第二步：校验邮箱验证码，成功返回短时重置令牌。
+  Future<String> verifyResetCode(String email, String code) async {
+    final response = await _client.post(
+      _uri('/v1/auth/verify-reset-code'),
+      headers: _jsonHeaders(),
+      body: jsonEncode({'email': email, 'code': code}),
+    );
+    final body = _decode(response);
+    if (response.statusCode != 200) throw _error(response.statusCode, body);
+    final token = body['resetToken'];
+    if (token is! String || token.isEmpty) throw ApiException(response.statusCode, 'request.invalid', '服务端未返回重置令牌');
+    return token;
+  }
+
+  /// 忘记密码第三步：用重置令牌设置新密码（成功后全部会话失效）。
+  Future<void> resetPassword(String resetToken, String newPassword) async {
+    final response = await _client.post(
+      _uri('/v1/auth/reset-password'),
+      headers: _jsonHeaders(),
+      body: jsonEncode({'resetToken': resetToken, 'newPassword': newPassword}),
+    );
+    if (response.statusCode != 204 && response.statusCode != 200) {
+      throw _error(response.statusCode, _decode(response));
+    }
+  }
+
+  /// 忘记密码：服务端恒返回 202（防枚举），界面统一提示"若邮箱存在，重置邮件已发送"。
+  Future<void> forgotPassword(String email) async {
+    final response = await _client.post(
+      _uri('/v1/auth/forgot-password'),
+      headers: _jsonHeaders(),
+      body: jsonEncode({'email': email}),
+    );
+    if (response.statusCode != 202 && response.statusCode != 200) {
+      throw _error(response.statusCode, _decode(response));
+    }
   }
 
   Map<String, dynamic> _decode(http.Response response) {

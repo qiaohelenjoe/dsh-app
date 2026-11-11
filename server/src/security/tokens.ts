@@ -97,3 +97,25 @@ export function buffersEqual(left: Buffer, right: Buffer): boolean {
 export function refreshTokenExpiry(days: number): Date {
   return new Date(Date.now() + days * 24 * 60 * 60 * 1000);
 }
+
+/** 密码重置第二步的短时令牌：邮箱验证码校验通过后签发，10 分钟内可用于改密。 */
+export async function signPasswordResetToken(accountId: string, secret: string, ttlSeconds: number): Promise<string> {
+  return new SignJWT({ scope: 'password-reset' })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setSubject(accountId)
+    .setIssuedAt()
+    .setExpirationTime(Math.floor(Date.now() / 1000) + ttlSeconds)
+    .sign(encoder.encode(secret));
+}
+
+export async function verifyPasswordResetToken(token: string, secret: string): Promise<{ accountId: string }> {
+  try {
+    const { payload } = await jwtVerify(token, encoder.encode(secret), { algorithms: ['HS256'] });
+    if (payload['scope'] !== 'password-reset' || typeof payload['sub'] !== 'string') {
+      throw new AccessTokenInvalidError();
+    }
+    return { accountId: payload['sub'] };
+  } catch {
+    throw new AccessTokenInvalidError();
+  }
+}

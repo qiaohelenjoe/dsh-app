@@ -7,6 +7,7 @@ export interface DeviceRow {
   kind: DeviceKind;
   name: string;
   platform: string;
+  machine_name: string | null;
   sign_public_key: string;
   ecdh_public_key: string;
   app_version: string | null;
@@ -19,7 +20,7 @@ export interface DeviceRow {
 }
 
 const DEVICE_COLUMNS = `
-  d.id, d.account_id, d.kind, d.name, d.platform,
+  d.id, d.account_id, d.kind, d.name, d.platform, d.machine_name,
   d.sign_public_key, d.ecdh_public_key, d.app_version,
   d.last_seen_at, d.last_ip, d.revoked_at, d.created_at, d.updated_at,
   (d.last_seen_at IS NOT NULL AND d.last_seen_at > now() - interval '90 seconds') AS online
@@ -51,8 +52,97 @@ export async function findDeviceById(pool: DbPool, deviceId: string): Promise<De
   return result.rows[0] ?? null;
 }
 
-export async function countAliveDevices(pool: DbPool, accountId: string, kind: DeviceKind): Promise<number> {
-  const result = await pool.query<{ count: string }>(
+/** 按计算机名称查活跃设备：设备身份的唯一判定依据（名称不参与）。 */
+export async function findAliveDeviceByMachineName(
+  pool: DbPool,
+  accountId: string,
+  kind: DeviceKind,
+  machineName: string,
+): Promise<DeviceRow | null> {
+  const result = await pool.query<DeviceRow>(
+    `SELECT ${DEVICE_COLUMNS}
+       FROM devices d
+      WHERE d.account_id = $1 AND d.kind = $2 AND d.machine_name = $3 AND d.revoked_at IS NULL
+      LIMIT 1`,
+    [accountId, kind, machineName],
+  );
+  return result.rows[0] ?? null;
+}
+
+/** 账号下"还没有计算机名称"的桌面设备里最久未连接的一台（自动接管的候选）。 */
+export async function findOldestUnboundDesktopDevice(pool: DbPool, accountId: string): Promise<DeviceRow | null> {
+  const result = await pool.query<DeviceRow>(
+    `SELECT ${DEVICE_COLUMNS}
+       FROM devices d
+      WHERE d.account_id = $1 AND d.kind = 'desktop' AND d.machine_name IS NULL AND d.revoked_at IS NULL
+      ORDER BY d.last_seen_at ASC NULLS FIRST, d.created_at ASC
+      LIMIT 1`,
+    [accountId],
+  );
+  return result.rows[0] ?? null;
+}
+
+/** 该计算机名称是否已被本账号下另一台活跃设备占用。 */
+export async function findMachineNameOwner(
+  pool: DbPool,
+  accountId: string,
+  machineName: string,
+): Promise<{ id: string; name: string } | null> {
+  const result = await pool.query<{ id: string; name: string }>(
+    `SELECT id, name FROM devices
+      WHERE account_id = $1 AND machine_name = $2 AND revoked_at IS NULL
+      LIMIT 1`,
+    [accountId, machineName],
+  );
+  return result.rows[0] ?? null;
+}
+
+/** 复用既有设备：刷新公钥/版本/最后可见；机器码只补不覆盖（老设备首次上报即补上）。 */
+export async function touchDeviceForReuse(
+  pool: DbPool,
+  input: {
+    deviceId: string;
+    appVersion: string | null;
+    signPublicKey: string;
+    ecdhPublicKey: string;
+    ip: string | null;
+    machineName: string | null;
+  },
+): Promise<DeviceRow | null> {
+  const result = await pool.query<DeviceRow>(
+    `UPDATE devices d
+        SET sign_public_key = $2,
+            ecdh_public_key = $3,
+            app_version = COALESCE($4, d.app_version),
+            last_seen_at = now(),
+            last_ip = $5,
+            machine_name = COALESCE(d.machine_name, $6)
+      WHERE d.id = $1 AND d.revoked_at IS NULL
+      RETURNING d.*, (d.last_seen_at IS NOT NULL AND d.last_seen_at > now() - interval '90 seconds') AS online`,
+    [input.deviceId, input.signPublicKey, input.ecdhPublicKey, input.appVersion, input.ip, input.machineName],
+  );
+  return result.rows[0] ?? null;
+}
+
+/** 给没有机器码的设备绑定短码；已有不同的码则不改（返回 null 表示未绑定）。 */
+export async function bindMachineName(
+  pool: DbPool,
+  deviceId: string,
+  accountId: string,
+  machineName: string,
+): Promise<DeviceRow | null> {
+  const result = await pool.query<DeviceRow>(
+    `UPDATE devices d
+        SET machine_name = $3
+      WHERE d.id = $1 AND d.account_id = $2 AND d.revoked_at IS NULL
+        AND (d.machine_name IS NULL OR d.machine_name = $3)
+      RETURNING d.*, (d.last_seen_at IS NOT NULL AND d.last_seen_at > now() - interval '90 seconds') AS online`,
+    [deviceId, accountId, machineName],
+  );
+  return result.rows[0] ?? null;
+}
+
+export async function countAliveDevices(pool: DbPool, accountId: string, kind: DeviceKind): Promise<number> {  const result = await pool.query<{ count: string }>(
     `SELECT count(*)::text AS count FROM devices
       WHERE account_id = $1 AND kind = $2 AND revoked_at IS NULL`,
     [accountId, kind],
@@ -69,14 +159,15 @@ export interface InsertDeviceInput {
   signPublicKey: string;
   ecdhPublicKey: string;
   ip: string | null;
+  machineName: string | null;
 }
 
 export async function insertDevice(pool: DbPool, input: InsertDeviceInput): Promise<DeviceRow> {
   try {
     const result = await pool.query<DeviceRow>(
       `INSERT INTO devices
-         (account_id, kind, name, platform, sign_public_key, ecdh_public_key, app_version, last_ip)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         (account_id, kind, name, platform, sign_public_key, ecdh_public_key, app_version, last_ip, machine_name)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *, false AS online`,
       [
         input.accountId,
@@ -87,6 +178,7 @@ export async function insertDevice(pool: DbPool, input: InsertDeviceInput): Prom
         input.ecdhPublicKey,
         input.appVersion,
         input.ip,
+        input.machineName,
       ],
     );
     return result.rows[0] as DeviceRow;
@@ -105,6 +197,7 @@ export interface UpgradePendingDeviceInput {
   signPublicKey: string;
   ecdhPublicKey: string;
   ip: string | null;
+  machineName?: string | null;
 }
 
 /**
@@ -121,7 +214,8 @@ export async function upgradePendingDevice(
             ecdh_public_key = $6,
             app_version = COALESCE($7, d.app_version),
             last_seen_at = now(),
-            last_ip = $8
+            last_ip = $8,
+            machine_name = COALESCE(d.machine_name, $10)
       WHERE d.account_id = $1 AND d.kind = $2 AND d.platform = $3 AND d.name = $4
         AND d.revoked_at IS NULL AND d.sign_public_key = $9
       RETURNING d.*, (d.last_seen_at IS NOT NULL AND d.last_seen_at > now() - interval '90 seconds') AS online`,
@@ -135,6 +229,7 @@ export async function upgradePendingDevice(
       input.appVersion,
       input.ip,
       PENDING_DEVICE_KEY,
+      input.machineName ?? null,
     ],
   );
   return result.rows[0] ?? null;

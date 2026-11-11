@@ -143,6 +143,13 @@ class _BootstrapPageState extends State<_BootstrapPage> {
     );
   }
 
+  /// 会话被服务端判定失效（刷新也失败）：清本地会话直接回登录页，不弹提示、不需要用户点退出。
+  Future<void> _handleSessionExpired() async {
+    await widget.store.clear();
+    if (!mounted) return;
+    setState(() => _session = null);
+  }
+
   Future<void> _logout() async {
     await widget.store.clear();
     AppLogger.instance.configure(api: widget.api, accessToken: null);
@@ -182,6 +189,7 @@ class _BootstrapPageState extends State<_BootstrapPage> {
       store: widget.store,
       onOpenDevice: _openDevice,
       onSessionRefreshed: (session) => setState(() => _session = session),
+      onSessionExpired: _handleSessionExpired,
       onOpenSettings: _openSettings,
     );
   }

@@ -6,6 +6,14 @@ import '../api.dart';
 import '../session_store.dart';
 import '../theme.dart';
 
+/// 设备标题：非本机（非手机自身）在名字后用括号显示计算机名称；老设备未上报时只显示名字。
+String _deviceTitle(DeviceInfo device) {
+  final machine = (device.machineName ?? '').trim();
+  if (machine.isEmpty) return device.name;
+  return '${device.name}（${machine.toUpperCase()}）';
+}
+
+
 /// 设备列表：在线优先（服务端已排序），显示平台图标与在线徽标；离线设备给出提示。
 /// 长按设备可重命名或撤销；AppBar 设置入口统一承载账号与登出。
 class DevicesPage extends StatefulWidget {
@@ -17,6 +25,7 @@ class DevicesPage extends StatefulWidget {
     required this.onOpenDevice,
     required this.onSessionRefreshed,
     required this.onOpenSettings,
+    this.onSessionExpired,
   });
 
   final ApiClient api;
@@ -25,6 +34,9 @@ class DevicesPage extends StatefulWidget {
   final void Function(DeviceInfo device, Session session) onOpenDevice;
   final void Function(Session session) onSessionRefreshed;
   final void Function(Session session) onOpenSettings;
+
+  /// 会话被服务端判定失效（刷新也失败）时的回调：清会话直接回登录页。
+  final Future<void> Function()? onSessionExpired;
 
   @override
   State<DevicesPage> createState() => _DevicesPageState();
@@ -54,7 +66,7 @@ class _DevicesPageState extends State<DevicesPage> with WidgetsBindingObserver {
   void _startPolling() {
     _pollTimer?.cancel();
     _pollTimer = Timer.periodic(_pollInterval, (_) {
-      if (!_loading) _load();
+      if (!_loading) _load(silent: true);
     });
   }
 
@@ -63,7 +75,7 @@ class _DevicesPageState extends State<DevicesPage> with WidgetsBindingObserver {
     if (state == _lifecycle) return;
     _lifecycle = state;
     _startPolling();
-    if (state == AppLifecycleState.resumed && !_loading) _load();
+    if (state == AppLifecycleState.resumed && !_loading) _load(silent: true);
   }
 
   @override
@@ -73,37 +85,68 @@ class _DevicesPageState extends State<DevicesPage> with WidgetsBindingObserver {
     super.dispose();
   }
 
-  Future<void> _load({bool retryOn401 = true}) async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
+  /// 静默刷新：定时轮询不显示转圈、数据没变不重建列表（与桌面面板一致）。
+  Future<void> _load({bool retryOn401 = true, bool silent = false}) async {
+    if (!silent) {
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+    }
     try {
       final all = await widget.api.listDevices(_session.accessToken);
-      final devices = all.where((device) => device.kind == 'desktop').toList();
+      final devices = all.where((device) => device.kind == 'desktop').toList()
+        ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
       if (!mounted) return;
+      // 静默刷新且数据没变：完全不触发重建
+      if (silent && _sameDevices(_devices, devices) && _error == null) return;
       setState(() {
         _devices = devices;
         _loading = false;
+        _error = null;
       });
     } on ApiException catch (error) {
       if (!mounted) return;
       if (error.statusCode == 401 && retryOn401) {
         final refreshed = await _refreshSession();
-        if (refreshed) return _load(retryOn401: false);
+        if (refreshed) return _load(retryOn401: false, silent: silent);
+        // 刷新也失败：会话已失效，直接回登录页（不提示、不需要用户点退出）
+        await widget.onSessionExpired?.call();
+        return;
       }
+      if (silent && _devices.isNotEmpty) return;
       setState(() {
         _error = error.message;
         _loading = false;
       });
     } catch (error) {
       if (!mounted) return;
+      // 静默刷新失败：保留当前列表，不打断用户
+      if (silent && _devices.isNotEmpty) return;
       setState(() {
         // 区分手机自身网络异常与设备离线：网络异常保留刚才的列表，等症状消失自动恢复
         _error = '网络异常，正在自动重试…';
         _loading = false;
       });
     }
+  }
+
+  /// 判断两次拉取的设备列表是否等价（id/名称/电脑名/平台/在线/最后在线）。
+  bool _sameDevices(List<DeviceInfo> a, List<DeviceInfo> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i += 1) {
+      final x = a[i];
+      final y = b[i];
+      if (x.id != y.id ||
+          x.name != y.name ||
+          x.platform != y.platform ||
+          x.online != y.online ||
+          x.machineName != y.machineName ||
+          x.lastSeenAt?.toIso8601String() != y.lastSeenAt?.toIso8601String()) {
+        return false;
+      }
+    }
+    return true;
   }
 
   Future<bool> _refreshSession() async {
@@ -143,7 +186,7 @@ class _DevicesPageState extends State<DevicesPage> with WidgetsBindingObserver {
     }
     if (_retrying) return;
     // 列表可能是旧快照（隧道刚重连）：先刷新一次再判断
-    await _load();
+    await _load(silent: true);
     if (!mounted) return;
     DeviceInfo? fresh = _findDevice(device.id);
     if (fresh != null && fresh.online) {
@@ -157,7 +200,7 @@ class _DevicesPageState extends State<DevicesPage> with WidgetsBindingObserver {
       for (var attempt = 0; attempt < 6; attempt += 1) {
         await Future<void>.delayed(const Duration(seconds: 3));
         if (!mounted) return;
-        await _load();
+        await _load(silent: true);
         if (!mounted) return;
         fresh = _findDevice(device.id);
         if (fresh != null && fresh.online) {
@@ -178,6 +221,7 @@ class _DevicesPageState extends State<DevicesPage> with WidgetsBindingObserver {
     }
     return null;
   }
+
 
   Future<void> _showDeviceMenu(DeviceInfo device) async {
     final action = await showModalBottomSheet<String>(
@@ -214,7 +258,7 @@ class _DevicesPageState extends State<DevicesPage> with WidgetsBindingObserver {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          device.name,
+                          _deviceTitle(device),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(color: DshTheme.fg, fontSize: 15, fontWeight: FontWeight.w600),
@@ -357,7 +401,7 @@ class _DevicesPageState extends State<DevicesPage> with WidgetsBindingObserver {
         ],
       ),
       body: RefreshIndicator(
-        onRefresh: () => _load(),
+        onRefresh: () => _load(silent: true),
         child: _buildBody(context),
       ),
     );
@@ -487,7 +531,7 @@ class _DeviceCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      device.name,
+                      _deviceTitle(device),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(color: DshTheme.fg, fontSize: 15, fontWeight: FontWeight.w600),

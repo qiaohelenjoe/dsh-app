@@ -51,7 +51,17 @@ export const forgotPasswordSchema = z.object({
   email: emailField,
 });
 
-export const resetPasswordSchema = z.object({
-  token: opaqueTokenField,
-  newPassword: passwordField,
+export const verifyResetCodeSchema = z.object({
+  email: emailField,
+  code: z.string().trim().regex(/^\d{6}$/, '验证码应为 6 位数字'),
 });
+
+export const resetPasswordSchema = z
+  .object({
+    newPassword: passwordField,
+    /** 旧流程：邮件里的链接令牌。 */
+    token: opaqueTokenField.optional(),
+    /** 新流程：验证码校验通过后拿到的短时重置令牌。 */
+    resetToken: opaqueTokenField.optional(),
+  })
+  .refine((value) => Boolean(value.token || value.resetToken), { message: '缺少重置令牌', path: ['token'] });

@@ -167,12 +167,33 @@ export function apply(ctx: DshHostContext, config: Partial<PluginConfig> = {}): 
   registerPanelSessionRoutes(
     ctx,
     new PanelSessionStore(resolved.panelSessionPath),
-    { apiBase: panelApiBase, downloadUrl: `${panelApiBase}/download` },
+    {
+      apiBase: panelApiBase,
+      downloadUrl: `${panelApiBase}/download`,
+    },
     (message) => log(ctx, message),
-    () => agentRef?.getTunnelDiagnostics() ?? null,
+    () => agentRef?.getTunnelSnapshot() ?? null,
     (session) => {
       if (!agentRef) return Promise.reject(new Error('插件尚未就绪'));
       return agentRef.adoptPanelSession(session);
+    },
+    // 面板「退出登录」：停本机隧道 + 清凭据，由宿主执行（面板自身只清会话）
+    async () => {
+      if (!agentRef) throw new Error('插件尚未就绪');
+      await agentRef.logout();
+    },
+    // 隧道状态订阅（SSE）：agent 注册时立即回一次快照，之后状态变化再推
+    (cb) => {
+      if (!agentRef) {
+        cb({ type: 'unavailable' });
+        return () => undefined;
+      }
+      return agentRef.onStatus(cb);
+    },
+    // 一次性认领历史设备：按计算机名称把本机绑定到已有设备行（不新建、不占名额）
+    (deviceId, session) => {
+      if (!agentRef) return Promise.reject(new Error('插件尚未就绪'));
+      return agentRef.claimDevice(deviceId, session);
     },
   );
   if (process.env.DSH_MOBILE_TUNNEL_DEBUG === '1') {

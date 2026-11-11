@@ -35,7 +35,7 @@ function findRepoRoot(start) {
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = findRepoRoot(here);
-const pluginRoot = join(repoRoot, 'plugin');
+const pluginRoot = join(repoRoot, 'dsh-mobile-tunnel');
 const LOGO_FILE = join(repoRoot, 'mobile', 'assets', 'deepseek-mark.svg');
 const OUT_FILE = join(pluginRoot, 'src', 'app-qr.ts');
 
@@ -49,7 +49,7 @@ qr.addData(DOWNLOAD_URL);
 qr.make();
 
 const count = qr.getModuleCount();
-const quiet = 4;
+const quiet = 3;
 const total = count + quiet * 2;
 const round = (n) => Math.round(n * 100) / 100;
 

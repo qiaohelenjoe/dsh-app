@@ -29,6 +29,8 @@ export interface DeviceAuthOptions {
   serverBaseUrl: string;
   deviceName: string;
   platform: 'win32' | 'darwin' | 'linux';
+  /** 计算机名称：登记时上报，服务端按它复用同一台设备（改名不影响）。 */
+  machineName?: string | null;
   fetchImpl?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
   openBrowser?: (url: string) => Promise<void> | void;
@@ -126,6 +128,8 @@ export async function registerDevice(
     platform: string;
     appVersion?: string;
     keys: DeviceKeys;
+    /** 计算机名称：服务端按它复用同一台设备（与设备名称无关）。 */
+    machineName?: string | null;
     fetchImpl?: typeof fetch;
   },
 ): Promise<{ id: string; name: string; kind: string; platform: string }> {
@@ -139,6 +143,7 @@ export async function registerDevice(
       appVersion: options.appVersion ?? '0.1.0',
       signPublicKey: options.keys.signPublicKey,
       ecdhPublicKey: options.keys.ecdhPublicKey,
+      ...(options.machineName ? { machineName: options.machineName } : {}),
     },
     options.accessToken,
   );
@@ -239,6 +244,49 @@ export async function requestDeviceSession(
   };
 }
 
+/** 给一台"还没有计算机名称"的历史设备补绑短码（需要该设备的会话令牌）。 */
+export async function bindOwnMachineName(
+  serverBaseUrl: string,
+  accessToken: string,
+  machineName: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const response = await postJson(
+    fetchImpl,
+    apiUrl(serverBaseUrl, '/v1/devices/self/machine-code'),
+    { machineName },
+    accessToken,
+  );
+  if (response.status !== 200) {
+    throw new Error(`补绑计算机名称失败（HTTP ${response.status}）：${await response.text()}`);
+  }
+}
+
+/**
+ * 一次性认领历史设备：把"从没记过计算机名称"的旧设备认成当前这台机器。
+ * 需要账号级（面板）会话；成功后该设备即可按计算机名称复用，不新建、不占名额。
+ */
+export async function claimDeviceByMachineName(
+  serverBaseUrl: string,
+  accessToken: string,
+  deviceId: string,
+  machineName: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ id: string; name: string; platform: string; machineName: string | null }> {
+  const response = await postJson(
+    fetchImpl,
+    apiUrl(serverBaseUrl, `/v1/devices/${encodeURIComponent(deviceId)}/claim`),
+    { machineName },
+    accessToken,
+  );
+  if (response.status !== 200) {
+    throw new Error(`认领设备失败（HTTP ${response.status}）：${await response.text()}`);
+  }
+  const body = (await response.json()) as { device?: { id: string; name: string; platform: string; machineName: string | null } };
+  if (!body.device) throw new Error('认领设备失败：响应缺少设备');
+  return body.device;
+}
+
 /** 完整设备码登录：申请 → 打开浏览器 → 轮询 → 生成密钥 → 登记设备。 */
 
 /** 默认浏览器打开确认页（未注入 openBrowser 时使用；失败不阻断登录）。 */
@@ -266,6 +314,7 @@ export async function loginWithDeviceCode(options: DeviceAuthOptions): Promise<S
     deviceName: options.deviceName,
     platform: options.platform,
     keys,
+    machineName: options.machineName ?? null,
     fetchImpl: options.fetchImpl,
   });
 

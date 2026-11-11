@@ -3,13 +3,18 @@ import { writeAudit } from '../auth/repositories/audit.js';
 import { ApiError } from '../http/errors.js';
 import { RateLimiter } from '../security/rate-limit.js';
 import {
+  bindMachineName,
   countAliveDevices,
   DeviceNameTakenError,
+  findAliveDeviceByMachineName,
   findDeviceById,
+  findMachineNameOwner,
+  findOldestUnboundDesktopDevice,
   insertDevice,
   listAliveDevices,
   renameDevice,
   revokeDevice,
+  touchDeviceForReuse,
   upgradePendingDevice,
   type DeviceRow,
 } from './repositories.js';
@@ -35,9 +40,22 @@ export interface RegisterDeviceInput {
   appVersion?: string | undefined;
   signPublicKey: string;
   ecdhPublicKey: string;
+  /** 计算机名称（如 DESKTOP-LFJSTDL）：设备身份的匹配键；老客户端不传，走兼容路径。 */
+  machineName?: string | undefined;
 }
 
 const REGISTER_LIMIT_PER_HOUR = 20;
+
+/** 计算机名称格式：字母数字与 . _ -，长度 1–64。 */
+const MACHINE_NAME_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+
+export function normalizeMachineName(raw: string): string {
+  const code = raw.trim().toUpperCase();
+  if (!MACHINE_NAME_PATTERN.test(code)) {
+    throw new ApiError(400, 'request.invalid', '计算机名称格式不正确（应形如 PC-3F7A-91C2）');
+  }
+  return code;
+}
 
 function toView(row: DeviceRow): DeviceView {
   return {
@@ -46,6 +64,7 @@ function toView(row: DeviceRow): DeviceView {
     name: row.name,
     platform: row.platform,
     online: row.online,
+    machineName: row.machine_name,
     lastSeenAt: row.last_seen_at ? row.last_seen_at.toISOString() : null,
     appVersion: row.app_version,
     createdAt: row.created_at.toISOString(),
@@ -74,13 +93,32 @@ export class DeviceService {
     });
   }
 
-  /** 登记设备：先查配额（403），再查注册频率（429），最后插入并处理同名冲突（409）。 */
+  /** 登记设备：按计算机名称优先复用；否则查配额（403）→ 注册频率（429）→ 插入并处理同名冲突（409）。 */
   async register(
     accountId: string,
     input: RegisterDeviceInput,
     context: RequestContext,
   ): Promise<DeviceView> {
     const kind: DeviceKind = inferDeviceKind(input.platform);
+    const machineName = input.machineName ? normalizeMachineName(input.machineName) : null;
+
+    // 身份优先：这台机器（按短码）已登记过就复用——不新建、不占名额、与设备名称无关
+    if (machineName) {
+      const existing = await findAliveDeviceByMachineName(this.pool, accountId, kind, machineName);
+      if (existing) {
+        const touched = await touchDeviceForReuse(this.pool, {
+          deviceId: existing.id,
+          appVersion: input.appVersion ?? null,
+          signPublicKey: input.signPublicKey,
+          ecdhPublicKey: input.ecdhPublicKey,
+          ip: context.ip,
+          machineName,
+        });
+        const row = touched ?? existing;
+        await this.auditRegister(accountId, row.id, kind, input, 'reused-by-machine-code');
+        return toView(row);
+      }
+    }
 
     // 设备码流程创建的占位设备：登记真实公钥即升级，不重复计数、不占用注册频率
     const upgraded = await upgradePendingDevice(this.pool, {
@@ -92,6 +130,7 @@ export class DeviceService {
       signPublicKey: input.signPublicKey,
       ecdhPublicKey: input.ecdhPublicKey,
       ip: context.ip,
+      machineName,
     });
     if (upgraded) {
       await this.auditRegister(accountId, upgraded.id, kind, input);
@@ -100,6 +139,25 @@ export class DeviceService {
 
     const alive = await countAliveDevices(this.pool, accountId, kind);
     if (alive >= DEVICE_QUOTAS[kind]) {
+      // 名额已满但本机是新出现的计算机名称：把账号下"还没有计算机名称、最久未连接"的老桌面设备自动接管给本机。
+      // 身份仍由短码决定，名称不参与；接管动作写审计，用户无需任何手工操作。
+      if (machineName && kind === 'desktop') {
+        const adoptable = await findOldestUnboundDesktopDevice(this.pool, accountId);
+        if (adoptable) {
+          const touched = await touchDeviceForReuse(this.pool, {
+            deviceId: adoptable.id,
+            appVersion: input.appVersion ?? null,
+            signPublicKey: input.signPublicKey,
+            ecdhPublicKey: input.ecdhPublicKey,
+            ip: context.ip,
+            machineName,
+          });
+          if (touched) {
+            await this.auditRegister(accountId, touched.id, kind, input, 'adopted-legacy-device');
+            return { ...toView(touched), adoptedFrom: adoptable.name };
+          }
+        }
+      }
       throw new ApiError(403, 'authz.device_quota_exceeded', `设备数量已达上限（${DEVICE_QUOTAS[kind]} 台）`);
     }
 
@@ -120,6 +178,7 @@ export class DeviceService {
         signPublicKey: input.signPublicKey,
         ecdhPublicKey: input.ecdhPublicKey,
         ip: context.ip,
+        machineName,
       });
       await this.auditRegister(accountId, row.id, kind, input);
       return toView(row);
@@ -129,6 +188,64 @@ export class DeviceService {
       }
       throw error;
     }
+  }
+
+  /**
+   * 老设备补名：已用设备会话连上来的设备，把自己的计算机名称补绑到本行。
+   * 只在自己那台设备上没有码（或码相同）时生效，别人改不动。
+   */
+  async bindOwnMachineName(deviceId: string, accountId: string, rawCode: string): Promise<DeviceView> {
+    const machineName = normalizeMachineName(rawCode);
+    const owner = await findMachineNameOwner(this.pool, accountId, machineName);
+    if (owner && owner.id !== deviceId) {
+      throw new ApiError(409, 'conflict.machine_name_taken', `该计算机名称已绑定在「${owner.name}」上`);
+    }
+    const bound = await bindMachineName(this.pool, deviceId, accountId, machineName);
+    if (!bound) {
+      const current = await findDeviceById(this.pool, deviceId);
+      if (!current || current.revoked_at !== null || current.account_id !== accountId) {
+        throw new ApiError(404, 'not_found.device', '设备不存在');
+      }
+      throw new ApiError(409, 'conflict.machine_name_taken', '该设备已绑定其他计算机名称');
+    }
+    return toView(bound);
+  }
+
+  /**
+   * 一次性认领：把一台"从没记过机器码"的历史设备认成当前这台机器。
+   * 校验归属、未撤销、该行没有码、码未被别的活跃设备占用；成功后写码（不新建、不占名额）。
+   */
+  async claimMachineCode(
+    accountId: string,
+    deviceId: string,
+    rawCode: string,
+    context: RequestContext,
+  ): Promise<DeviceView> {
+    const machineName = normalizeMachineName(rawCode);
+    const device = await this.loadOwnedDevice(accountId, deviceId);
+    if (device.machine_name) {
+      throw new ApiError(409, 'conflict.machine_name_bound', '该设备已绑定计算机名称，无需认领');
+    }
+    const owner = await findMachineNameOwner(this.pool, accountId, machineName);
+    if (owner) {
+      throw new ApiError(409, 'conflict.machine_name_taken', `该计算机名称已绑定在「${owner.name}」上`);
+    }
+    const bound = await bindMachineName(this.pool, device.id, accountId, machineName);
+    if (!bound) throw new ApiError(409, 'conflict.machine_name_taken', '认领失败：设备状态已变化');
+    try {
+      await writeAudit(this.pool, {
+        accountId,
+        deviceId: device.id,
+        action: 'device.claim',
+        result: 'ok',
+        ip: context.ip,
+        userAgent: context.userAgent,
+        detail: { machineName },
+      });
+    } catch (error) {
+      console.warn(`[devices] 写 device.claim 审计失败：${(error as Error).message}`);
+    }
+    return toView(bound);
   }
 
   async rename(accountId: string, deviceId: string, name: string): Promise<DeviceView> {
@@ -166,6 +283,7 @@ export class DeviceService {
     deviceId: string,
     kind: DeviceKind,
     input: RegisterDeviceInput,
+    outcome = 'created',
   ): Promise<void> {
     try {
       await writeAudit(this.pool, {
@@ -173,7 +291,7 @@ export class DeviceService {
         deviceId,
         action: 'device.register',
         result: 'ok',
-        detail: { kind, platform: input.platform, name: input.name },
+        detail: { kind, platform: input.platform, name: input.name, outcome, machineName: input.machineName ?? null },
       });
     } catch (error) {
       console.warn(`[devices] 写 device.register 审计失败（deviceId=${deviceId}）：${(error as Error).message}`);

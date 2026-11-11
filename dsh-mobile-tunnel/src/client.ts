@@ -27,6 +27,11 @@ const NAV_ENTRY_ID = 'dsh-mobile-account-nav-entry';
  */
 let apiBase = DEFAULT_API_BASE;
 let downloadUrl = APP_DOWNLOAD_URL;
+/** 会话已被服务端撤销：此后面板一律按未登录处理，避免过期会话反复渲染。 */
+let sessionRevoked = false;
+/** 面板打开期间的自动刷新定时器（10 秒；手动「刷新」按钮始终保留）。 */
+let autoRefreshTimer: number | null = null;
+const AUTO_REFRESH_MS = 10_000;
 
 const STYLE = `
 #${OVERLAY_ID}{position:fixed;inset:0;z-index:2147483001;display:flex;align-items:center;justify-content:center;background:rgba(10,14,24,.45);backdrop-filter:blur(2px);font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
@@ -44,16 +49,23 @@ const STYLE = `
 #${OVERLAY_ID} label.dshma-field input:focus{border-color:#4f7cff;box-shadow:0 0 0 3px rgba(79,124,255,.16)}
 #${OVERLAY_ID} .dshma-primary{width:100%;border:0;border-radius:10px;padding:11px 0;font-size:14px;font-weight:600;color:#fff;background:linear-gradient(135deg,#4f7cff,#7a5cff);cursor:pointer;margin-top:4px}
 #${OVERLAY_ID} .dshma-primary:disabled{opacity:.6;cursor:default}
+#${OVERLAY_ID} .dshma-link{align-self:flex-start;border:0;background:transparent;padding:0;margin-top:10px;font-size:12px;color:#4f7cff;cursor:pointer}
+#${OVERLAY_ID} .dshma-link:disabled{opacity:.6;cursor:default}
 #${OVERLAY_ID} .dshma-error{color:#e5484d;font-size:12px;margin:10px 0 0;white-space:pre-wrap}
 #${OVERLAY_ID} .dshma-muted{color:#8a93a3;font-size:12px}
 #${OVERLAY_ID} .dshma-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 0;border-bottom:1px solid rgba(120,130,150,.14)}
 #${OVERLAY_ID} .dshma-row:last-child{border-bottom:0}
+#${OVERLAY_ID} .dshma-device{display:flex;flex-direction:column;gap:2px;min-width:0}
+#${OVERLAY_ID} .dshma-device-name{display:flex;align-items:center;font-size:13px}
+#${OVERLAY_ID} .dshma-device-meta{font-size:11px;color:#8a93a3;padding-left:15px}
+#${OVERLAY_ID} .dshma-tag{margin-left:6px;padding:1px 6px;border-radius:6px;font-size:11px;background:rgba(79,124,255,.12);color:#4f7cff}
 #${OVERLAY_ID} .dshma-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:7px}
 #${OVERLAY_ID} .dshma-actions{display:flex;gap:8px;margin-top:14px}
 #${OVERLAY_ID} .dshma-ghost{flex:1;border:1px solid rgba(120,130,150,.30);background:transparent;color:inherit;border-radius:10px;padding:9px 0;font-size:13px;cursor:pointer}
 #${OVERLAY_ID} .dshma-download{margin-top:16px;padding-top:14px;border-top:1px solid rgba(120,130,150,.14);text-align:center}
-#${OVERLAY_ID} .dshma-download-title{font-size:13px;font-weight:600;margin-bottom:10px}
-#${OVERLAY_ID} .dshma-qr{width:164px;height:164px;margin:0 auto 8px;background:#fff;border-radius:12px;padding:8px;box-sizing:border-box;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+#${OVERLAY_ID} .dshma-qr{width:220px;height:220px;margin:0 auto 10px;background:#fff;border-radius:10px;padding:6px;box-sizing:border-box;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+#${OVERLAY_ID} .dshma-tip{margin-top:12px;padding:10px 12px;border-radius:10px;background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.35);color:#b45309;font-size:12px;line-height:1.6}
+#${OVERLAY_ID} .dshma-tip .dshma-tip-row{display:flex;justify-content:space-between;gap:10px}
 #${OVERLAY_ID} .dshma-qr svg{display:block;width:100%;height:100%}
 #${OVERLAY_ID} .dshma-download-link{display:inline-block;font-size:13px;font-weight:600;color:#4f7cff;text-decoration:none;padding:6px 0}
 #${OVERLAY_ID} .dshma-download-link:hover{text-decoration:underline}
@@ -84,15 +96,39 @@ interface Session {
 const SESSION_ROUTE = '/plugins/dsh-mobile-tunnel/panel-session';
 /** 面板登录后把本机登记为受控设备（面板登录本身不登记设备）。 */
 const REGISTER_DEVICE_ROUTE = '/plugins/dsh-mobile-tunnel/register-device';
+/** 会话续期：宿主串行刷新并先落盘，浏览器侧不再自己轮换 refresh。 */
+const REFRESH_ROUTE = '/plugins/dsh-mobile-tunnel/panel-refresh';
+/** 退出登录：宿主停隧道 + 清凭据，面板只负责调用。 */
+const LOGOUT_ROUTE = '/plugins/dsh-mobile-tunnel/panel-logout';
+/** 隧道状态推送（SSE）：状态一变就推，面板不轮询。 */
+const EVENTS_ROUTE = '/plugins/dsh-mobile-tunnel/events';
+/** 本机隧道状态：SSE 首帧前的补读。 */
+const TUNNEL_STATUS_ROUTE = '/plugins/dsh-mobile-tunnel/tunnel-status';
+
+interface RegisterDeviceResult {
+  ok: boolean;
+  deviceId?: string;
+  online?: boolean;
+  deviceName?: string;
+  platform?: string;
+  error?: string;
+}
+
+interface TunnelSnapshot {
+  status?: string;
+  online?: boolean;
+  lastError?: string | null;
+  deviceId?: string | null;
+}
 
 let deviceRegistrationRequested = false;
 
 /**
  * 面板登录后告知宿主：把本机登记为受控设备并启动隧道。
- * 幂等（宿主侧同名同平台复用），失败不打扰用户（面板展示形式保持不变）。
+ * 幂等（宿主侧同名同平台复用）；返回登记结果，供面板登录后等待在线状态。
  */
-async function ensureHostDeviceRegistered(): Promise<void> {
-  if (deviceRegistrationRequested) return;
+async function ensureHostDeviceRegistered(): Promise<RegisterDeviceResult> {
+  if (deviceRegistrationRequested) return { ok: true };
   deviceRegistrationRequested = true;
   try {
     const response = await fetch(REGISTER_DEVICE_ROUTE, {
@@ -100,9 +136,15 @@ async function ensureHostDeviceRegistered(): Promise<void> {
       headers: { 'content-type': 'application/json' },
       body: '{}',
     });
-    if (!response.ok) deviceRegistrationRequested = false;
-  } catch {
+    const body = (await response.json().catch(() => null)) as RegisterDeviceResult | null;
+    if (!response.ok) {
+      deviceRegistrationRequested = false;
+      return { ok: false, error: body?.error ?? `HTTP ${response.status}` };
+    }
+    return { ok: true, ...(body ?? {}) };
+  } catch (error) {
     deviceRegistrationRequested = false;
+    return { ok: false, error: (error as Error).message };
   }
 }
 
@@ -140,6 +182,7 @@ function writeLocalSession(session: Session | null): void {
 
 /** 读会话：宿主机接口优先；接口不可用（旧版插件/异常）才回落 sessionStorage。 */
 async function loadSession(): Promise<Session | null> {
+  if (sessionRevoked) return null;
   try {
     const response = await fetch(SESSION_ROUTE, { cache: 'no-store', headers: { accept: 'application/json' } });
     if (response.ok) {
@@ -161,6 +204,7 @@ async function loadSession(): Promise<Session | null> {
 
 /** 写会话：先镜像到本地副本（保证接口异常时不丢登录），再交给宿主机持久化。 */
 async function saveSession(session: Session | null): Promise<void> {
+  if (session) sessionRevoked = false;
   writeLocalSession(session);
   try {
     if (session) {
@@ -195,6 +239,26 @@ async function api(path: string, options: { method?: string; body?: unknown; tok
   return { status: response.status, body };
 }
 
+/** 宿主同源接口（不带账号服务前缀）：续期、退出登录都走这里。 */
+async function hostPost(path: string): Promise<{ status: number; body: any }> {
+  try {
+    const response = await fetch(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+    let body: any = null;
+    try {
+      body = await response.json();
+    } catch {
+      body = null;
+    }
+    return { status: response.status, body };
+  } catch (error) {
+    return { status: 0, body: { error: (error as Error).message } };
+  }
+}
+
 function errorText(result: { status: number; body: any }): string {
   const code = result.body?.error?.code ?? '';
   const message = result.body?.error?.message ?? '';
@@ -224,6 +288,79 @@ interface Controller {
 
 function createPanel(): Controller {
   let overlay: HTMLElement | null = null;
+  /** 本机隧道实时快照（SSE 推送 / 首帧补读），设备列表里本机行的状态以它为准。 */
+  let liveTunnel: TunnelSnapshot | null = null;
+  let localDeviceId: string | null = null;
+  /** 面板内容重绘钩子：SSE 事件到达后按需重载。 */
+  let reloadActive: (() => void) | null = null;
+  let events: EventSource | null = null;
+  let reloadTimer: number | null = null;
+
+  function scheduleReload(): void {
+    if (!reloadActive) return;
+    if (reloadTimer !== null) window.clearTimeout(reloadTimer);
+    reloadTimer = window.setTimeout(() => {
+      reloadTimer = null;
+      reloadActive?.();
+    }, 300);
+  }
+
+  function applyLiveTunnel(tunnel: TunnelSnapshot | null | undefined): void {
+    if (!tunnel) return;
+    liveTunnel = tunnel;
+    if (typeof tunnel.deviceId === 'string' && tunnel.deviceId.length > 0) localDeviceId = tunnel.deviceId;
+    scheduleReload();
+  }
+
+  /** 打开面板时启动：先读一次 tunnel-status 拿首帧，再订阅 SSE（状态变化即时推）。 */
+  function startLive(): void {
+    if (events) return;
+    void fetch(TUNNEL_STATUS_ROUTE, { cache: 'no-store', headers: { accept: 'application/json' } })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((body: { tunnel?: TunnelSnapshot } | null) => {
+        applyLiveTunnel(body?.tunnel);
+      })
+      .catch(() => undefined);
+    try {
+      events = new EventSource(EVENTS_ROUTE);
+      events.onmessage = (event: MessageEvent<string>) => {
+        try {
+          const payload = JSON.parse(event.data) as { type?: string; tunnel?: TunnelSnapshot };
+          if (payload?.type === 'tunnel') applyLiveTunnel(payload.tunnel);
+        } catch {
+          // 坏帧忽略
+        }
+      };
+      events.onerror = () => {
+        // EventSource 自动重连，这里不额外处理
+      };
+    } catch {
+      events = null;
+    }
+  }
+
+  function stopLive(): void {
+    events?.close();
+    events = null;
+    if (reloadTimer !== null) {
+      window.clearTimeout(reloadTimer);
+      reloadTimer = null;
+    }
+    stopAutoRefresh();
+  }
+
+  /** 面板打开期间的自动刷新（10 秒一次）；手动「刷新」按钮不受影响，随时可点。 */
+  function startAutoRefresh(refresh: () => void): void {
+    stopAutoRefresh();
+    autoRefreshTimer = window.setInterval(refresh, AUTO_REFRESH_MS);
+  }
+
+  function stopAutoRefresh(): void {
+    if (autoRefreshTimer !== null) {
+      window.clearInterval(autoRefreshTimer);
+      autoRefreshTimer = null;
+    }
+  }
 
   async function render(): Promise<void> {
     const node = overlay;
@@ -261,7 +398,6 @@ function createPanel(): Controller {
   /** 登录后展示手机 App 下载入口：二维码内容与链接地址一致。 */
   function renderDownload(card: HTMLElement): void {
     const section = el('div', 'dshma-download');
-    section.appendChild(el('div', 'dshma-download-title', '下载手机 App'));
     // 二维码是构建期按默认下载页离线生成的；换服务器后地址可能不同，此时只保留链接
     if (downloadUrl === APP_DOWNLOAD_URL) {
       const qr = el('div', 'dshma-qr');
@@ -278,10 +414,11 @@ function createPanel(): Controller {
   }
 
   function renderAuth(card: HTMLElement): void {
-    let mode: 'login' | 'register' = 'login';
+    // 未登录默认进入注册（1.1.6：用户明确要求）
+    let mode: 'login' | 'register' = 'register';
     const tabs = el('div', 'dshma-tabs');
-    const loginTab = el('button', 'dshma-tab active', '登录');
-    const registerTab = el('button', 'dshma-tab', '注册');
+    const loginTab = el('button', 'dshma-tab', '登录');
+    const registerTab = el('button', 'dshma-tab active', '注册');
     tabs.append(loginTab, registerTab);
     card.appendChild(tabs);
 
@@ -306,8 +443,11 @@ function createPanel(): Controller {
     confirmLabel.style.display = 'none';
     const submit = el('button', 'dshma-primary', '登录');
     submit.type = 'submit';
+    const forgot = el('button', 'dshma-link', '忘记密码');
+    forgot.type = 'button';
+    const notice = el('p', 'dshma-muted');
     const error = el('p', 'dshma-error');
-    form.append(emailLabel, passwordLabel, confirmLabel, submit, error);
+    form.append(emailLabel, passwordLabel, confirmLabel, submit, forgot, notice, error);
     card.appendChild(form);
 
     function switchMode(next: 'login' | 'register'): void {
@@ -317,10 +457,15 @@ function createPanel(): Controller {
       confirmLabel.style.display = next === 'register' ? 'block' : 'none';
       confirm.required = next === 'register';
       submit.textContent = next === 'register' ? '注册并登录' : '登录';
+      // 忘记密码只在登录态提供（注册态尚无账号）
+      forgot.style.display = next === 'login' ? 'inline-block' : 'none';
+      notice.textContent = '';
       error.textContent = '';
     }
     loginTab.addEventListener('click', () => switchMode('login'));
     registerTab.addEventListener('click', () => switchMode('register'));
+    // 初始就按当前 mode 同步确认密码框、按钮文案与 tab 高亮
+    switchMode(mode);
 
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
@@ -368,13 +513,223 @@ function createPanel(): Controller {
           refreshToken: loggedIn.body.refreshToken,
           email: emailValue,
         });
-        void ensureHostDeviceRegistered();
+        // 登录成功：先让宿主把本机登记成受控设备并建隧道，再渲染，
+        // 避免面板先显示“暂无设备/离线”、过几十秒才变在线（1.1.6）
+        deviceRegistrationRequested = false;
+        await ensureHostDeviceRegistered();
         void render();
       } catch (requestError) {
         error.textContent = `网络错误：${(requestError as Error).message}`;
       } finally {
         submit.disabled = false;
         submit.textContent = mode === 'register' ? '注册并登录' : '登录';
+      }
+    });
+
+    forgot.addEventListener('click', () => {
+      renderForgotPassword(card, email.value.trim());
+    });
+  }
+
+  /**
+   * 忘记密码（三步页，不用弹框）：邮箱 → 验证码 → 新密码两次确认 → 回登录。
+   */
+  function renderForgotPassword(card: HTMLElement, initialEmail: string): void {
+    let step: 'email' | 'code' | 'password' = 'email';
+    let email = initialEmail;
+    let resetToken = '';
+    card.innerHTML = '';
+    const head = el('div', 'dshma-head');
+    head.appendChild(el('div', 'dshma-title', 'DSH 移动端账号'));
+    card.appendChild(head);
+    const sub = el('div', 'dshma-sub', '找回密码');
+    card.appendChild(sub);
+    const body = el('div');
+    card.appendChild(body);
+    const error = el('p', 'dshma-error');
+    const info = el('p', 'dshma-muted');
+
+    const renderStep = (): void => {
+      body.innerHTML = '';
+      error.textContent = '';
+      info.textContent = '';
+      if (step === 'email') {
+        sub.textContent = '第 1 步 / 3：输入注册邮箱';
+        const field = el('label', 'dshma-field', '邮箱');
+        const input = el('input');
+        input.type = 'email';
+        input.autocomplete = 'username';
+        input.value = email;
+        field.appendChild(input);
+        const next = el('button', 'dshma-primary', '发送验证码');
+        next.type = 'button';
+        next.addEventListener('click', async () => {
+          const value = input.value.trim();
+          if (!value) { error.textContent = '请填写邮箱'; return; }
+          next.disabled = true;
+          next.textContent = '发送中…';
+          try {
+            await api('/v1/auth/forgot-password', { method: 'POST', body: { email: value } });
+            email = value;
+            step = 'code';
+            renderStep();
+            info.textContent = '若邮箱存在，验证码已发送，请查收邮件（10 分钟内有效）';
+          } catch (requestError) {
+            error.textContent = `发送失败：${(requestError as Error).message}`;
+          } finally {
+            next.disabled = false;
+            next.textContent = '发送验证码';
+          }
+        });
+        body.append(field, next, error, info);
+      } else if (step === 'code') {
+        sub.textContent = '第 2 步 / 3：输入邮件验证码';
+        const field = el('label', 'dshma-field', '验证码');
+        const input = el('input');
+        input.inputMode = 'numeric';
+        input.autocomplete = 'one-time-code';
+        input.maxLength = 6;
+        field.appendChild(input);
+        const next = el('button', 'dshma-primary', '下一步');
+        next.type = 'button';
+        next.addEventListener('click', async () => {
+          const code = input.value.trim();
+          if (!/^\d{6}$/.test(code)) { error.textContent = '请输入 6 位数字验证码'; return; }
+          next.disabled = true;
+          next.textContent = '校验中…';
+          try {
+            const result = await api('/v1/auth/verify-reset-code', { method: 'POST', body: { email, code } });
+            if (result.status !== 200 || !result.body?.resetToken) {
+              error.textContent = '验证码不正确或已过期';
+              return;
+            }
+            resetToken = String(result.body.resetToken);
+            step = 'password';
+            renderStep();
+          } catch (requestError) {
+            error.textContent = `校验失败：${(requestError as Error).message}`;
+          } finally {
+            next.disabled = false;
+            next.textContent = '下一步';
+          }
+        });
+        const resend = el('button', 'dshma-link', '重新发送验证码');
+        resend.type = 'button';
+        resend.addEventListener('click', () => { step = 'email'; renderStep(); });
+        body.append(field, next, resend, error, info);
+      } else {
+        sub.textContent = '第 3 步 / 3：设置新密码';
+        const pw1 = el('label', 'dshma-field', '新密码');
+        const in1 = el('input');
+        in1.type = 'password';
+        in1.autocomplete = 'new-password';
+        pw1.appendChild(in1);
+        const pw2 = el('label', 'dshma-field', '确认新密码');
+        const in2 = el('input');
+        in2.type = 'password';
+        in2.autocomplete = 'new-password';
+        pw2.appendChild(in2);
+        const save = el('button', 'dshma-primary', '保存并返回登录');
+        save.type = 'button';
+        save.addEventListener('click', async () => {
+          const value = in1.value;
+          if (value.length < 10) { error.textContent = '密码至少 10 位，且不能是常见弱口令'; return; }
+          if (value !== in2.value) { error.textContent = '两次输入的新密码不一致'; return; }
+          save.disabled = true;
+          save.textContent = '保存中…';
+          try {
+            const result = await api('/v1/auth/reset-password', { method: 'POST', body: { resetToken, newPassword: value } });
+            if (result.status !== 204 && result.status !== 200) {
+              error.textContent = errorText(result);
+              return;
+            }
+            writeLocalSession(null);
+            sessionRevoked = true;
+            void saveSession(null).then(() => render());
+          } catch (requestError) {
+            error.textContent = `保存失败：${(requestError as Error).message}`;
+          } finally {
+            save.disabled = false;
+            save.textContent = '保存并返回登录';
+          }
+        });
+        body.append(pw1, pw2, save, error, info);
+      }
+      const back = el('button', 'dshma-link', '返回登录');
+      back.type = 'button';
+      back.addEventListener('click', () => { void render(); });
+      body.appendChild(back);
+    };
+    renderStep();
+  }
+
+  /** 修改密码：当前密码 + 新密码；成功后服务端撤销其他会话，本机也回到登录态。 */
+  function renderChangePassword(card: HTMLElement, body: HTMLElement, session: Session): void {
+    body.innerHTML = '';
+    const form = el('form');
+    const currentLabel = el('label', 'dshma-field', '当前密码');
+    const current = el('input');
+    current.type = 'password';
+    current.autocomplete = 'current-password';
+    current.required = true;
+    currentLabel.appendChild(current);
+    const nextLabel = el('label', 'dshma-field', '新密码');
+    const next = el('input');
+    next.type = 'password';
+    next.autocomplete = 'new-password';
+    next.required = true;
+    nextLabel.appendChild(next);
+    const confirmLabel = el('label', 'dshma-field', '确认新密码');
+    const confirm = el('input');
+    confirm.type = 'password';
+    confirm.autocomplete = 'new-password';
+    confirm.required = true;
+    confirmLabel.appendChild(confirm);
+    const submit = el('button', 'dshma-primary', '保存新密码');
+    submit.type = 'submit';
+    const cancel = el('button', 'dshma-link', '返回');
+    cancel.type = 'button';
+    const error = el('p', 'dshma-error');
+    form.append(currentLabel, nextLabel, confirmLabel, submit, cancel, error);
+    body.appendChild(form);
+
+    cancel.addEventListener('click', () => {
+      void render();
+    });
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      error.textContent = '';
+      const nextValue = next.value;
+      if (nextValue.length < 10) {
+        error.textContent = '密码至少 10 位，且不能是常见弱口令';
+        return;
+      }
+      if (nextValue !== confirm.value) {
+        error.textContent = '两次输入的新密码不一致';
+        return;
+      }
+      submit.disabled = true;
+      submit.textContent = '保存中…';
+      try {
+        const result = await api('/v1/auth/change-password', {
+          method: 'POST',
+          token: session.accessToken,
+          body: { currentPassword: current.value, newPassword: nextValue },
+        });
+        if (result.status !== 204) {
+          error.textContent = errorText(result);
+          return;
+        }
+        // 改密后服务端撤销其他会话；本机同样退出，让用户用新密码重新登录
+        writeLocalSession(null);
+        await saveSession(null);
+        void render();
+      } catch (requestError) {
+        error.textContent = `网络错误：${(requestError as Error).message}`;
+      } finally {
+        submit.disabled = false;
+        submit.textContent = '保存新密码';
       }
     });
   }
@@ -386,78 +741,179 @@ function createPanel(): Controller {
 
     const actions = el('div', 'dshma-actions');
     const refresh = el('button', 'dshma-ghost', '刷新');
+    const changePassword = el('button', 'dshma-ghost', '修改密码');
     const logout = el('button', 'dshma-ghost', '退出登录');
-    actions.append(refresh, logout);
+    actions.append(refresh, changePassword, logout);
     card.appendChild(actions);
-    logout.addEventListener('click', () => {
-      void saveSession(null).then(() => render());
+    changePassword.addEventListener('click', () => {
+      renderChangePassword(card, body, session);
     });
-    refresh.addEventListener('click', () => loadAccount());
+    refresh.addEventListener('click', () => {
+      void loadAccount();
+    });
+    logout.addEventListener('click', () => {
+      void logoutAccount();
+    });
 
-    async function ensureToken(): Promise<string | null> {
-      let current = await loadSession();
-      if (!current) return null;
+    /** 续期交给宿主（串行 + 先落盘）；只有服务端明确撤销会话才提示重新登录。 */
+    async function ensureToken(): Promise<
+      { token: string } | { error: 'none' | 'revoked' | 'transient'; message?: string }
+    > {
+      const current = await loadSession();
+      if (!current) return { error: 'none' };
       const account = await api('/v1/account', { token: current.accessToken });
-      if (account.status !== 401) return current.accessToken;
-      const refreshed = await api('/v1/auth/refresh', { method: 'POST', body: { refreshToken: current.refreshToken } });
-      if (refreshed.status !== 200) {
-        await saveSession(null);
-        return null;
+      if (account.status !== 401) return { token: current.accessToken };
+      const refreshed = await hostPost(REFRESH_ROUTE);
+      if (refreshed.status === 200) {
+        const next = normalizeSession(refreshed.body?.session);
+        if (next) {
+          writeLocalSession(next);
+          return { token: next.accessToken };
+        }
       }
-      current = {
-        accessToken: refreshed.body.accessToken,
-        refreshToken: refreshed.body.refreshToken,
-        email: current.email,
-      };
-      await saveSession(current);
-      return current.accessToken;
+      if (refreshed.status === 401) return { error: 'revoked' };
+      return { error: 'transient', message: refreshed.body?.message ?? `HTTP ${refreshed.status}` };
     }
 
-    async function loadAccount(): Promise<void> {
-      body.innerHTML = '<p class="dshma-muted">加载中…</p>';
+    async function logoutAccount(): Promise<void> {
+      logout.disabled = true;
       try {
-        const token = await ensureToken();
-        if (!token) {
-          void render();
+        const result = await hostPost(LOGOUT_ROUTE);
+        if (result.status !== 200) {
+          body.innerHTML = '';
+          body.appendChild(el('p', 'dshma-error', `退出失败：${errorText(result)}`));
+          return;
+        }
+        writeLocalSession(null);
+        deviceRegistrationRequested = false;
+        stopLive();
+        closePanel();
+      } catch (requestError) {
+        body.innerHTML = '';
+        body.appendChild(el('p', 'dshma-error', `退出失败：${(requestError as Error).message}`));
+      } finally {
+        logout.disabled = false;
+      }
+    }
+
+    function renderTip(info: {
+      desktopDevices?: number;
+      desktopLimit?: number;
+      mobileDevices?: number;
+      mobileLimit?: number;
+    }): void {
+      const tip = el('div', 'dshma-tip');
+      tip.appendChild(el('div', '', '登录状态约 30 天有效，期间自动续期，无需反复登录。'));
+      const row = el('div', 'dshma-tip-row');
+      row.appendChild(
+        el(
+          'span',
+          '',
+          `桌面 ${info.desktopDevices ?? 0}/${info.desktopLimit ?? 2} · 移动 ${info.mobileDevices ?? 0}/${info.mobileLimit ?? 2}`,
+        ),
+      );
+      tip.appendChild(row);
+      body.appendChild(tip);
+    }
+
+    /** 设备列表渲染签名：静默刷新时数据没变就完全不碰 DOM（不闪、不重绘）。 */
+    let lastRenderSignature: string | null = null;
+
+    /**
+     * 拉取账号与设备状态。
+     * silent=true（定时刷新 / 隧道事件触发）：不显示「加载中」，数据没变化时完全不重绘。
+     */
+    async function loadAccount(options: { silent?: boolean } = {}): Promise<void> {
+      const silent = options.silent === true;
+      const hasContent = lastRenderSignature !== null;
+      if (!silent) body.innerHTML = '<p class="dshma-muted">加载中…</p>';
+      try {
+        const auth = await ensureToken();
+        if ('error' in auth) {
+          // 服务端已判定会话失效（撤销/过期）：直接清会话回到登录画面，不弹提示、不需要用户点按钮
+          if (auth.error === 'revoked') {
+            sessionRevoked = true;
+            writeLocalSession(null);
+            void saveSession(null).then(() => render());
+            return;
+          }
+          // 静默刷新遇到临时错误：保留当前画面，不闪错误
+          if (silent && hasContent) return;
+          body.innerHTML = '';
+          const message =
+            auth.error === 'none'
+              ? '未登录'
+              : `续期失败，请稍后重试（${auth.message ?? '网络异常'}）`;
+          body.appendChild(el('p', 'dshma-error', message));
           return;
         }
         const [account, devices] = await Promise.all([
-          api('/v1/account', { token }),
-          api('/v1/devices', { token }),
+          api('/v1/account', { token: auth.token }),
+          api('/v1/devices', { token: auth.token }),
         ]);
         if (account.status !== 200) {
+          if (silent && hasContent) return;
           body.innerHTML = '';
           body.appendChild(el('p', 'dshma-error', errorText(account)));
           return;
         }
+        const signature = JSON.stringify({ account: account.body, devices: devices.body });
+        // 数据没变：静默刷新直接返回，不产生任何重绘
+        if (silent && signature === lastRenderSignature) return;
+        lastRenderSignature = signature;
         body.innerHTML = '';
         const info = account.body.account;
         const usage = account.body.usage ?? {};
-        const quota = el('div', 'dshma-row');
-        quota.appendChild(el('span', '', `桌面 ${usage.desktopDevices ?? 0}/${info.limits?.desktopDevices ?? 20} · 移动 ${usage.mobileDevices ?? 0}/${info.limits?.mobileDevices ?? 10}`));
-        quota.appendChild(el('span', 'dshma-muted', '配额'));
-        body.appendChild(quota);
         body.appendChild(el('div', 'dshma-row', '设备'));
         const list = Array.isArray(devices.body?.devices) ? devices.body.devices : [];
-        if (list.length === 0) body.appendChild(el('p', 'dshma-muted', '暂无设备，请在电脑端安装 dsh-mobile-tunnel 插件'));
-        for (const device of list) {
+        // 按设备名排序：刷新后顺序不会再跳（中文按拼音序）
+        const sortedList = [...list].sort((a, b) => String(a?.name ?? '').localeCompare(String(b?.name ?? ''), 'zh-Hans-CN'));
+        if (sortedList.length === 0) {
+          body.appendChild(el('p', 'dshma-muted', '暂无设备，请在电脑端安装 dsh-mobile-tunnel 插件'));
+        }
+        for (const device of sortedList) {
+          const isLocal = Boolean(localDeviceId) && device.id === localDeviceId;
+          const online = isLocal && liveTunnel ? Boolean(liveTunnel.online) : Boolean(device.online);
           const row = el('div', 'dshma-row');
-          const left = el('span');
+          const left = el('div', 'dshma-device');
+          const title = el('div', 'dshma-device-name');
           const dot = el('span', 'dshma-dot');
-          dot.style.background = device.online ? '#30a46c' : '#b0b7c3';
-          left.append(dot, document.createTextNode(`${device.name}（${device.platform}）`));
+          dot.style.background = online ? '#30a46c' : '#b0b7c3';
+          // 有计算机名称就在名字后用括号显示（本机同样显示，不做特殊判断）
+          const computerName = typeof device.machineName === 'string' && device.machineName.length > 0
+            ? `（${device.machineName.toUpperCase()}）`
+            : '';
+          title.append(dot, document.createTextNode(`${String(device.name)}${computerName}`));
+          if (isLocal) title.appendChild(el('span', 'dshma-tag', '本机'));
+          left.appendChild(title);
+          // 平台类型用小字放在名称下方，不放进括号
+          left.appendChild(el('div', 'dshma-device-meta', String(device.platform ?? '')));
           row.appendChild(left);
-          row.appendChild(el('span', 'dshma-muted', device.online ? '在线' : '离线'));
+          row.appendChild(el('span', 'dshma-muted', online ? '在线' : '离线'));
           body.appendChild(row);
         }
-        body.appendChild(el('p', 'dshma-muted', '登录状态约 30 天有效，期间自动续期，无需反复登录。'));
+        renderTip({
+          desktopDevices: Number(usage.desktopDevices ?? 0),
+          desktopLimit: info.limits?.desktopDevices,
+          mobileDevices: Number(usage.mobileDevices ?? 0),
+          mobileLimit: info.limits?.mobileDevices,
+        });
       } catch (requestError) {
+        // 静默刷新失败：保留当前画面；首次加载才显示错误
+        if (silent && hasContent) return;
         body.innerHTML = '';
         body.appendChild(el('p', 'dshma-error', `加载失败：${(requestError as Error).message}`));
       }
     }
 
+    reloadActive = () => {
+      void loadAccount({ silent: true });
+    };
     void loadAccount();
+    // 打开面板期间每 10 秒自动刷新一次设备状态（手动「刷新」按钮仍然保留）
+    startAutoRefresh(() => {
+      void loadAccount({ silent: true });
+    });
   }
 
   function openPanel(): void {
@@ -469,12 +925,15 @@ function createPanel(): Controller {
       if (event.target === overlay) closePanel();
     });
     document.body.appendChild(overlay);
+    startLive();
     void render();
   }
 
   function closePanel(): void {
     overlay?.remove();
     overlay = null;
+    reloadActive = null;
+    stopLive();
   }
 
   return { open: openPanel, close: closePanel };

@@ -44,6 +44,34 @@ export const TUNNEL_STATUS_ROUTE = '/plugins/dsh-mobile-tunnel/tunnel-status';
  */
 export const REGISTER_DEVICE_ROUTE = '/plugins/dsh-mobile-tunnel/register-device';
 
+/**
+ * 一次性认领历史设备：把"从没记过计算机名称"的旧设备认成当前这台机器（1.1.6）。
+ * 认领只写计算机名称，不新建设备、不占用名额；之后按计算机名称复用，与设备名称无关。
+ */
+export const CLAIM_DEVICE_ROUTE = '/plugins/dsh-mobile-tunnel/claim-device';
+
+/**
+ * 面板会话续期：由宿主进程串行执行刷新并先落盘，避免浏览器侧并发轮换导致
+ * 服务端判定 refresh 复用而撤销整条会话（1.1.6）。
+ */
+export const REFRESH_ROUTE = '/plugins/dsh-mobile-tunnel/panel-refresh';
+
+/**
+ * 退出登录：先停本机隧道（agent.logout），再清面板会话（1.1.6）。
+ */
+export const LOGOUT_ROUTE = '/plugins/dsh-mobile-tunnel/panel-logout';
+
+/**
+ * 隧道状态推送（SSE）：状态变化即推，面板不再轮询（1.1.6）。
+ */
+export const EVENTS_ROUTE = '/plugins/dsh-mobile-tunnel/events';
+
+interface PanelSessionValue {
+  accessToken: string;
+  refreshToken: string;
+  email: string;
+}
+
 async function handleDiag(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method !== 'POST') {
     let text = '';
@@ -122,6 +150,170 @@ async function refreshPanelSession(
   }
 }
 
+type RefreshOutcome =
+  | { ok: true; session: PanelSessionValue }
+  | { ok: false; reason: 'revoked' | 'transient'; message?: string };
+
+/**
+ * 分类刷新：只有服务端明确返回 401/403 才判定会话被撤销；限流、5xx、网络异常
+ * 都算 transient，由面板提示重试而**不清**本地凭据。
+ */
+async function refreshPanelSessionClassified(
+  store: PanelSessionStore,
+  session: PanelSessionValue,
+  apiBase: string,
+): Promise<RefreshOutcome> {
+  try {
+    const response = await fetch(`${apiBase.replace(/\/+$/, '')}/v1/auth/refresh`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ refreshToken: session.refreshToken }),
+    });
+    if (response.status === 401 || response.status === 403) {
+      return { ok: false, reason: 'revoked' };
+    }
+    if (!response.ok) {
+      return { ok: false, reason: 'transient', message: `HTTP ${response.status}` };
+    }
+    const body = (await response.json()) as { accessToken?: string; refreshToken?: string };
+    if (!body.accessToken || !body.refreshToken) {
+      return { ok: false, reason: 'transient', message: 'invalid-body' };
+    }
+    const next = { accessToken: body.accessToken, refreshToken: body.refreshToken, email: session.email };
+    // 先落盘再返回：保证新 refresh 一定写进宿主文件，避免下次用旧令牌被判复用
+    await store.save(next);
+    return { ok: true, session: next };
+  } catch (error) {
+    return { ok: false, reason: 'transient', message: String((error as Error).message) };
+  }
+}
+
+/** 单飞：同一时刻只允许一个刷新在飞，多个调用共享同一结果。 */
+let refreshInFlight: Promise<RefreshOutcome> | null = null;
+
+function singleFlightRefresh(
+  store: PanelSessionStore,
+  session: PanelSessionValue,
+  apiBase: string,
+): Promise<RefreshOutcome> {
+  if (!refreshInFlight) {
+    refreshInFlight = refreshPanelSessionClassified(store, session, apiBase).finally(() => {
+      refreshInFlight = null;
+    });
+  }
+  return refreshInFlight;
+}
+
+async function handlePanelRefresh(
+  req: IncomingMessage,
+  res: ServerResponse,
+  store: PanelSessionStore,
+  apiBase: string,
+): Promise<void> {
+  if (!sameOrigin(req)) {
+    sendJson(res, 403, { error: 'origin-rejected' });
+    return;
+  }
+  if (req.method !== 'POST') {
+    sendJson(res, 405, { error: 'method-not-allowed' });
+    return;
+  }
+  const session = await store.load();
+  if (!session) {
+    sendJson(res, 401, { error: 'not-logged-in' });
+    return;
+  }
+  const result = await singleFlightRefresh(store, session, apiBase);
+  if (!result.ok) {
+    const status = result.reason === 'revoked' ? 401 : 503;
+    sendJson(res, status, { error: result.reason, message: result.message ?? null });
+    return;
+  }
+  sendJson(res, 200, { ok: true, session: result.session });
+}
+
+async function handlePanelLogout(
+  req: IncomingMessage,
+  res: ServerResponse,
+  store: PanelSessionStore,
+  logout?: () => Promise<void>,
+  log?: (message: string) => void,
+): Promise<void> {
+  if (!sameOrigin(req)) {
+    sendJson(res, 403, { error: 'origin-rejected' });
+    return;
+  }
+  if (req.method !== 'POST') {
+    sendJson(res, 405, { error: 'method-not-allowed' });
+    return;
+  }
+  let tunnelStopped = false;
+  if (logout) {
+    try {
+      await logout();
+      tunnelStopped = true;
+    } catch (error) {
+      // 隧道停不下来也要清掉面板会话，否则用户会卡在“已登录但连不上”
+      log?.(`[dsh-mobile-tunnel] 面板退出时停止隧道失败：${(error as Error).message}`);
+    }
+  }
+  await store.clear();
+  sendJson(res, 200, { ok: true, tunnelStopped });
+}
+
+async function handleEvents(
+  req: IncomingMessage,
+  res: ServerResponse,
+  subscribe?: (cb: (event: unknown) => void) => () => void,
+): Promise<void> {
+  if (!sameOrigin(req)) {
+    sendJson(res, 403, { error: 'origin-rejected' });
+    return;
+  }
+  if (req.method !== 'GET') {
+    sendJson(res, 405, { error: 'method-not-allowed' });
+    return;
+  }
+  if (!subscribe) {
+    sendJson(res, 503, { error: 'unavailable' });
+    return;
+  }
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-store, no-transform',
+    connection: 'keep-alive',
+    'x-accel-buffering': 'no',
+  });
+  // 关闭 Node 默认的响应超时，让长连接一直保持（面板关闭时由客户端断开）
+  res.setTimeout?.(0);
+  res.flushHeaders?.();
+  const write = (payload: unknown): void => {
+    if (res.writableEnded || res.destroyed) return;
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+  let unsubscribe: (() => void) | undefined;
+  try {
+    unsubscribe = subscribe(write);
+  } catch {
+    write({ type: 'unavailable' });
+  }
+  const ping = setInterval(() => {
+    if (res.writableEnded || res.destroyed) return;
+    res.write(': ping\n\n');
+  }, 20_000);
+  ping.unref?.();
+  const cleanup = (): void => {
+    clearInterval(ping);
+    try {
+      unsubscribe?.();
+    } catch {
+      // 忽略
+    }
+  };
+  req.on('close', cleanup);
+  res.on('close', cleanup);
+}
+
 async function handleRegisterDevice(
   req: IncomingMessage,
   res: ServerResponse,
@@ -129,7 +321,7 @@ async function handleRegisterDevice(
   apiBase: string,
   adopt?: (
     session: { accessToken: string; refreshToken: string; email: string },
-  ) => Promise<{ deviceId: string; reused: boolean; online: boolean }>,
+  ) => Promise<{ deviceId: string; reused: boolean; online: boolean; deviceName?: string; platform?: string }>,
 ): Promise<void> {
   if (!sameOrigin(req)) {
     sendJson(res, 403, { error: 'origin-rejected' });
@@ -173,8 +365,74 @@ async function handleRegisterDevice(
   }
 }
 
-function latestWorkspaceContext(): WorkspaceContext | null {
-  const root = join(homedir(), '.dsh', 'sessions');
+async function handleClaimDevice(
+  req: IncomingMessage,
+  res: ServerResponse,
+  store: PanelSessionStore,
+  apiBase: string,
+  claim?: (
+    deviceId: string,
+    session: { accessToken: string; refreshToken: string; email: string },
+  ) => Promise<{ deviceId: string; deviceName?: string; online?: boolean }>,
+): Promise<void> {
+  if (!sameOrigin(req)) {
+    sendJson(res, 403, { error: 'origin-rejected' });
+    return;
+  }
+  if (req.method !== 'POST') {
+    sendJson(res, 405, { error: 'method-not-allowed' });
+    return;
+  }
+  if (!claim) {
+    sendJson(res, 503, { error: 'unavailable' });
+    return;
+  }
+  const contentType = String(req.headers['content-type'] ?? '').toLowerCase();
+  if (!contentType.startsWith('application/json')) {
+    sendJson(res, 415, { error: 'json-required' });
+    return;
+  }
+  let payload: { deviceId?: unknown } | null = null;
+  try {
+    payload = JSON.parse(await readBody(req)) as { deviceId?: unknown };
+  } catch {
+    sendJson(res, 400, { error: 'invalid-json' });
+    return;
+  }
+  const deviceId = typeof payload?.deviceId === 'string' ? payload.deviceId.trim() : '';
+  if (!/^[0-9a-fA-F-]{36}$/.test(deviceId)) {
+    sendJson(res, 400, { error: 'invalid-device-id' });
+    return;
+  }
+  let session = await store.load();
+  if (!session) {
+    sendJson(res, 401, { error: 'not-logged-in' });
+    return;
+  }
+  try {
+    const result = await claim(deviceId, session);
+    sendJson(res, 200, { ok: true, ...result });
+  } catch (error) {
+    const message = String((error as Error).message ?? error);
+    if (!/HTTP 401|token_expired|token_invalid/.test(message)) {
+      sendJson(res, 400, { error: message });
+      return;
+    }
+    const refreshed = await refreshPanelSession(store, session, apiBase);
+    if (!refreshed) {
+      sendJson(res, 401, { error: 'session-expired', message });
+      return;
+    }
+    try {
+      const result = await claim(deviceId, refreshed);
+      sendJson(res, 200, { ok: true, ...result });
+    } catch (retryError) {
+      sendJson(res, 400, { error: String((retryError as Error).message) });
+    }
+  }
+}
+
+function latestWorkspaceContext(): WorkspaceContext | null {  const root = join(homedir(), '.dsh', 'sessions');
   let best: WorkspaceContext | null = null;
   let workspaces: string[];
   try {
@@ -280,6 +538,7 @@ export interface PanelPublicConfig {
   apiBase: string;
   /** App 下载页地址（二维码与下载链接都用它） */
   downloadUrl: string;
+  /** 本机计算机名称（PC-XXXX-XXXX）：设备身份，面板展示用；读不到时为 null。 */
 }
 
 async function handle(
@@ -344,7 +603,13 @@ export function registerPanelSessionRoutes(
   getTunnelDiagnostics?: () => unknown,
   adoptPanelDevice?: (
     session: { accessToken: string; refreshToken: string; email: string },
-  ) => Promise<{ deviceId: string; reused: boolean; online: boolean }>,
+  ) => Promise<{ deviceId: string; reused: boolean; online: boolean; deviceName?: string; platform?: string }>,
+  logoutPanelDevice?: () => Promise<void>,
+  subscribeStatus?: (cb: (event: unknown) => void) => () => void,
+  claimPanelDevice?: (
+    deviceId: string,
+    session: { accessToken: string; refreshToken: string; email: string },
+  ) => Promise<{ deviceId: string; deviceName?: string; online?: boolean }>,
 ): void {
   let disposed = false;
   let release: (() => void) | undefined;
@@ -397,6 +662,38 @@ export function registerPanelSessionRoutes(
         },
       });
       if (typeof registerDeviceRoute === 'function') disposers.push(registerDeviceRoute as () => void);
+      const claimDeviceRoute = webServer.register({
+        kind: 'exact',
+        path: CLAIM_DEVICE_ROUTE,
+        handler: (req, res) => {
+          void handleClaimDevice(req, res, store, publicConfig.apiBase, claimPanelDevice);
+        },
+      });
+      if (typeof claimDeviceRoute === 'function') disposers.push(claimDeviceRoute as () => void);
+      const refreshDeviceRoute = webServer.register({
+        kind: 'exact',
+        path: REFRESH_ROUTE,
+        handler: (req, res) => {
+          void handlePanelRefresh(req, res, store, publicConfig.apiBase);
+        },
+      });
+      if (typeof refreshDeviceRoute === 'function') disposers.push(refreshDeviceRoute as () => void);
+      const logoutDeviceRoute = webServer.register({
+        kind: 'exact',
+        path: LOGOUT_ROUTE,
+        handler: (req, res) => {
+          void handlePanelLogout(req, res, store, logoutPanelDevice, log);
+        },
+      });
+      if (typeof logoutDeviceRoute === 'function') disposers.push(logoutDeviceRoute as () => void);
+      const eventsRoute = webServer.register({
+        kind: 'exact',
+        path: EVENTS_ROUTE,
+        handler: (req, res) => {
+          void handleEvents(req, res, subscribeStatus);
+        },
+      });
+      if (typeof eventsRoute === 'function') disposers.push(eventsRoute as () => void);
       const fsRoots = webServer.register({
         kind: 'exact',
         path: FS_ROOTS_ROUTE,

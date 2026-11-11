@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { WebSocket } from 'ws';
 import type { RawData } from 'ws';
 import {
+  bindOwnMachineName,
+  claimDeviceByMachineName,
   generateDeviceKeys,
   loginWithDeviceCode,
   refreshTokens,
@@ -14,6 +16,7 @@ import {
   type DeviceKeys,
   type DeviceSessionTokens,
 } from './auth.js';
+import { computeMachineName } from './machine-name.js';
 import type { PluginConfig } from './config.js';
 import {
   createLocalDshForwarder,
@@ -81,6 +84,7 @@ export class TunnelAgent {
   private tunnel: TunnelClient | null = null;
   private state: AccountCardState;
   private stopped = false;
+  private readonly listeners = new Set<(event: unknown) => void>();
 
   constructor(
     private readonly config: PluginConfig,
@@ -102,6 +106,37 @@ export class TunnelAgent {
     return this.tunnel?.getDiagnostics() ?? null;
   }
 
+  /** 本机当前登记的 deviceId（未登录为 null）。 */
+  get deviceId(): string | null {
+    return this.credentials?.deviceId ?? null;
+  }
+
+  /** 隧道快照（诊断对象本身已含 deviceId）；隧道未启动时为 null。 */
+  getTunnelSnapshot(): TunnelDiagnostics | null {
+    return this.getTunnelDiagnostics();
+  }
+
+  /** 面板状态快照：卡片状态 + 隧道诊断（SSE 与首帧都发这个）。 */
+  snapshot(): { state: AccountCardState; tunnel: TunnelDiagnostics | null } {
+    return { state: this.state, tunnel: this.getTunnelSnapshot() };
+  }
+
+  /**
+   * 订阅状态快照：注册时立即回调一次当前值，之后每次状态变化再回调。
+   * 面板据此用 SSE 拿在线状态，不再轮询。
+   */
+  onStatus(cb: (event: unknown) => void): () => void {
+    this.listeners.add(cb);
+    try {
+      cb({ type: 'tunnel', ...this.snapshot() });
+    } catch {
+      // 忽略
+    }
+    return () => {
+      this.listeners.delete(cb);
+    };
+  }
+
   /** 冷启动：有本地凭据则静默恢复隧道（spec §6.3）。 */
   async autostart(): Promise<void> {
     const stored = await this.deps.store.load();
@@ -111,6 +146,31 @@ export class TunnelAgent {
     }
     this.credentials = stored;
     this.startTunnel();
+    // 老设备补码：设备行还没有计算机名称时，用现有设备会话把本机计算机名称补上（失败不影响连接）
+    void this.reportMachineCode(stored);
+  }
+
+  /** 本机计算机名称（如 PC-3F7A-91C2）；读不到系统标识时返回 null。 */
+  machineName(): string | null {
+    return computeMachineName();
+  }
+
+  /** 把本机计算机名称补绑到当前设备行（仅当该行还没有码，服务端幂等）。 */
+  async reportMachineCode(credentials: StoredCredentials = this.credentials as StoredCredentials): Promise<boolean> {
+    const code = this.machineName();
+    if (!code || !credentials?.accessToken) return false;
+    try {
+      await bindOwnMachineName(
+        this.config.serverBaseUrl,
+        credentials.accessToken,
+        code,
+        this.deps.fetchImpl ?? fetch,
+      );
+      return true;
+    } catch {
+      // 老服务端没有该接口、或该行已绑定不同码：都不影响隧道
+      return false;
+    }
   }
 
   async login(): Promise<AccountCardState> {
@@ -121,6 +181,7 @@ export class TunnelAgent {
         serverBaseUrl: this.config.serverBaseUrl,
         deviceName: this.config.deviceName,
         platform: this.config.platform,
+        machineName: this.machineName(),
         fetchImpl: this.deps.fetchImpl,
         ...this.deps.authOptions,
         onUserCode: (info) => {
@@ -157,14 +218,14 @@ export class TunnelAgent {
     accessToken: string;
     refreshToken: string;
     email: string;
-  }): Promise<{ deviceId: string; reused: boolean; online: boolean }> {
+  }): Promise<{ deviceId: string; reused: boolean; online: boolean; deviceName: string; platform: string }> {
     const fetchImpl = this.deps.fetchImpl ?? fetch;
     const base = this.config.serverBaseUrl.replace(/\/$/, '');
     this.stopped = false;
 
     const resolveDevice = async (
       preferStored: boolean,
-    ): Promise<{ deviceId: string; keys: DeviceKeys; reused: boolean }> => {
+    ): Promise<{ deviceId: string; keys: DeviceKeys; reused: boolean; name?: string }> => {
       const stored = await this.deps.store.load();
       if (preferStored && stored && stored.deviceId && stored.accountEmail === session.email) {
         return {
@@ -185,22 +246,33 @@ export class TunnelAgent {
         listResponse && listResponse.ok
           ? (
               (await listResponse.json()) as {
-                devices?: Array<{ id: string; name: string; platform: string; kind: string }>;
+                devices?: Array<{
+                  id: string;
+                  name: string;
+                  platform: string;
+                  kind: string;
+                  machineName?: string | null;
+                }>;
               }
             ).devices ?? []
           : [];
-      const existing = devices.find(
-        (device) =>
-          device.kind === 'desktop' &&
-          device.platform === this.config.platform &&
-          device.name === this.config.deviceName,
-      );
+      // 身份只认计算机名称：设备名称可随时修改，不能参与判定
+      const machineName = this.machineName();
+      const existing = machineName
+        ? devices.find(
+            (device) =>
+              device.kind === 'desktop' &&
+              device.platform === this.config.platform &&
+              device.machineName === machineName,
+          )
+        : undefined;
       if (existing) {
         // 复用已有设备时拿不到私钥（服务端只存公钥）；隧道握手只用 deviceId，不影响连接
         return {
           deviceId: existing.id,
           keys: { signPublicKey: '', ecdhPublicKey: '', signPrivateKeyPem: '', ecdhPrivateKeyPem: '' },
           reused: true,
+          name: existing.name,
         };
       }
       const keys = generateDeviceKeys();
@@ -210,9 +282,10 @@ export class TunnelAgent {
         deviceName: this.config.deviceName,
         platform: this.config.platform,
         keys,
+        machineName,
         fetchImpl,
       });
-      return { deviceId: device.id, keys, reused: false };
+      return { deviceId: device.id, keys, reused: false, name: device.name };
     };
 
     let resolved = await resolveDevice(true);
@@ -248,7 +321,61 @@ export class TunnelAgent {
     this.tunnel?.stop();
     this.tunnel = null;
     this.startTunnel();
-    return { deviceId: resolved.deviceId, reused: resolved.reused, online: this.getTunnelDiagnostics()?.online ?? false };
+    void this.reportMachineCode();
+    return {
+      deviceId: resolved.deviceId,
+      reused: resolved.reused,
+      online: this.getTunnelDiagnostics()?.online ?? false,
+      // 服务端认的设备名（自动接管老设备时是那台的原名），与本地 COMPUTERNAME 无关
+      deviceName: resolved.name ?? this.config.deviceName,
+      platform: this.config.platform,
+    };
+  }
+
+  /**
+   * 一次性认领历史设备：把"从没记过计算机名称"的旧设备认成当前这台机器。
+   * 认领后按计算机名称复用，不再依赖设备名称；不新建设备、不消耗名额。
+   */
+  async claimDevice(
+    deviceId: string,
+    session: { accessToken: string; refreshToken: string; email: string },
+  ): Promise<{ deviceId: string; deviceName: string; online: boolean }> {
+    const machineName = this.machineName();
+    if (!machineName) throw new Error('无法读取本机计算机名称，不能认领设备');
+    const fetchImpl = this.deps.fetchImpl ?? fetch;
+    const claimed = await claimDeviceByMachineName(
+      this.config.serverBaseUrl,
+      session.accessToken,
+      deviceId,
+      machineName,
+      fetchImpl,
+    );
+    const tokens = await requestDeviceSession(
+      this.config.serverBaseUrl,
+      session.accessToken,
+      claimed.id,
+      fetchImpl,
+    );
+    this.stopped = false;
+    this.credentials = {
+      deviceId: claimed.id,
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      accountEmail: session.email,
+      signPublicKey: '',
+      ecdhPublicKey: '',
+      signPrivateKeyPem: '',
+      ecdhPrivateKeyPem: '',
+    };
+    await this.deps.store.save(this.credentials);
+    this.tunnel?.stop();
+    this.tunnel = null;
+    this.startTunnel();
+    return {
+      deviceId: claimed.id,
+      deviceName: claimed.name,
+      online: this.getTunnelDiagnostics()?.online ?? false,
+    };
   }
 
   async logout(): Promise<void> {
@@ -268,6 +395,14 @@ export class TunnelAgent {
   private setState(state: AccountCardState): void {
     this.state = state;
     this.deps.onStateChange?.(state);
+    const event = { type: 'tunnel', ...this.snapshot() };
+    for (const listener of this.listeners) {
+      try {
+        listener(event);
+      } catch {
+        // 单个订阅者异常不影响其它订阅者
+      }
+    }
   }
 
   private startTunnel(): void {

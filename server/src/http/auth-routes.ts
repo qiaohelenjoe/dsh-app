@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { normalizeEmail, type AuthService, type RequestContext } from '../auth/service.js';
 import type { RateLimiter } from '../security/rate-limit.js';
@@ -12,6 +13,7 @@ import {
   refreshSchema,
   registerSchema,
   resetPasswordSchema,
+  verifyResetCodeSchema,
   webLoginSchema,
 } from './schemas.js';
 
@@ -35,8 +37,15 @@ function enforceLimit(limiter: RateLimiter, key: string, limit: number, windowMs
   }
 }
 
-/** 认证相关 7 个端点（规格 §9 / api.md §1、§5）。 */
+const RESET_PAGE_HTML = readFileSync(new URL('../../public/reset.html', import.meta.url), 'utf8');
+
+/** 认证相关 7 个端点（规格 §9 / api.md §1、§5）+ 重置密码页面。 */
 export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): void {
+  // 重置密码页面：邮件里的链接是 `${publicBaseUrl}/reset?t=<token>`，页面自己调 reset-password。
+  app.get('/reset', async (_request, reply) => {
+    return reply.code(200).type('text/html; charset=utf-8').send(RESET_PAGE_HTML);
+  });
+
   app.post('/v1/auth/register', async (request, reply) => {
     const body = registerSchema.parse(request.body);
     enforceLimit(deps.limiter, `register:ip:${request.ip}`, 3, 60 * 60 * 1000);
@@ -87,6 +96,14 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
     await deps.auth.forgotPassword(body.email, requestContext(request));
     // 防用户枚举：邮箱存在与否恒返回 202
     return reply.code(202).send({ status: 'accepted' });
+  });
+
+  app.post('/v1/auth/verify-reset-code', async (request, reply) => {
+    const body = verifyResetCodeSchema.parse(request.body);
+    enforceLimit(deps.limiter, `reset-verify:ip:${request.ip}`, 20, 60 * 60 * 1000);
+    enforceLimit(deps.limiter, `reset-verify:account:${normalizeEmail(body.email)}`, 10, 60 * 60 * 1000);
+    const result = await deps.auth.verifyResetCode(body.email, body.code, requestContext(request));
+    return reply.code(200).send(result);
   });
 
   app.post('/v1/auth/reset-password', async (request, reply) => {

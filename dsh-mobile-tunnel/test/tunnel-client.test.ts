@@ -108,21 +108,35 @@ describe('TunnelClient 连接可靠性', () => {
 
   test('注册成功后上线；长时间无入站帧触发 keepalive 重建', async () => {
     const harness = await startServer();
+    const statuses: TunnelStatus[] = [];
     harness.server.on('connection', (socket) => {
       socket.send(JSON.stringify({ t: 'registered', deviceId: 'device-1', heartbeatSec: 25, protocol: 2 }));
       // 之后保持沉默：客户端必须靠自身看门狗发现死连接
     });
-    const { client, logs } = makeClient(harness.port, { keepaliveMs: 40, deadAfterMs: 120 });
+    const { client, logs } = makeClient(harness.port, {
+      keepaliveMs: 40,
+      deadAfterMs: 120,
+      onStatus: (status) => statuses.push(status),
+    });
     try {
       client.start();
       await waitFor(() => client.getDiagnostics().online, 2000);
       assert.equal(client.getDiagnostics().status, 'online');
-      await waitFor(
-        () => client.getDiagnostics().lastError === 'keepalive-timeout' || logs.some((line) => line.includes('判定连接已死')),
-        3000,
-      );
+      // 只看“曾判定死连接”这个事件本身；不断言某一瞬间的 online 值——
+      // 本地回环重连极快，取值瞬间可能已经恢复在线（旧断言因此偶发失败）。
+      await waitFor(() => logs.some((line) => line.includes('判定连接已死')), 3000);
       assert.equal(client.getDiagnostics().lastError, 'keepalive-timeout');
-      assert.equal(client.getDiagnostics().online, false);
+      assert.ok(
+        statuses.includes('reconnecting'),
+        `判定死连接后应出现 reconnecting，实际状态序列：${statuses.join(',')}`,
+      );
+      // 重连成功后应再次回到 online（首连 + 重连各一次）
+      await waitFor(() => client.getDiagnostics().online, 3000);
+      assert.equal(client.getDiagnostics().status, 'online');
+      assert.ok(
+        statuses.filter((status) => status === 'online').length >= 2,
+        `应出现两次 online（首连与重连），实际状态序列：${statuses.join(',')}`,
+      );
     } finally {
       client.stop();
       await harness.close();

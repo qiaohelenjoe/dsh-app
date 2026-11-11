@@ -76,6 +76,7 @@ export async function registerDevice(options) {
         appVersion: options.appVersion ?? '0.1.0',
         signPublicKey: options.keys.signPublicKey,
         ecdhPublicKey: options.keys.ecdhPublicKey,
+        ...(options.machineName ? { machineName: options.machineName } : {}),
     }, options.accessToken);
     if (response.status === 409) {
         // 设备已存在（例如登出后重新登录）：复用同账号同平台同名设备
@@ -138,6 +139,27 @@ export async function requestDeviceSession(serverBaseUrl, accessToken, deviceId,
         expiresIn: body.expiresIn ?? 0,
     };
 }
+/** 给一台"还没有计算机名称"的历史设备补绑短码（需要该设备的会话令牌）。 */
+export async function bindOwnMachineName(serverBaseUrl, accessToken, machineName, fetchImpl = fetch) {
+    const response = await postJson(fetchImpl, apiUrl(serverBaseUrl, '/v1/devices/self/machine-code'), { machineName }, accessToken);
+    if (response.status !== 200) {
+        throw new Error(`补绑计算机名称失败（HTTP ${response.status}）：${await response.text()}`);
+    }
+}
+/**
+ * 一次性认领历史设备：把"从没记过计算机名称"的旧设备认成当前这台机器。
+ * 需要账号级（面板）会话；成功后该设备即可按计算机名称复用，不新建、不占名额。
+ */
+export async function claimDeviceByMachineName(serverBaseUrl, accessToken, deviceId, machineName, fetchImpl = fetch) {
+    const response = await postJson(fetchImpl, apiUrl(serverBaseUrl, `/v1/devices/${encodeURIComponent(deviceId)}/claim`), { machineName }, accessToken);
+    if (response.status !== 200) {
+        throw new Error(`认领设备失败（HTTP ${response.status}）：${await response.text()}`);
+    }
+    const body = (await response.json());
+    if (!body.device)
+        throw new Error('认领设备失败：响应缺少设备');
+    return body.device;
+}
 /** 完整设备码登录：申请 → 打开浏览器 → 轮询 → 生成密钥 → 登记设备。 */
 /** 默认浏览器打开确认页（未注入 openBrowser 时使用；失败不阻断登录）。 */
 function openUrlInBrowser(url) {
@@ -166,6 +188,7 @@ export async function loginWithDeviceCode(options) {
         deviceName: options.deviceName,
         platform: options.platform,
         keys,
+        machineName: options.machineName ?? null,
         fetchImpl: options.fetchImpl,
     });
     return {
