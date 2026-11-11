@@ -1,5 +1,5 @@
 import Fastify, { type FastifyInstance } from 'fastify';
-import { consoleMailer, type Mailer } from './auth/mailer.js';
+import { buildMailer, type Mailer } from './auth/mailer.js';
 import { DeviceCodeService } from './auth/device-code.js';
 import { AuthService } from './auth/service.js';
 import type { AuthConfig } from './config.js';
@@ -106,7 +106,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   const authService = new AuthService({
     pool: options.pool,
     config: options.authConfig,
-    mailer: options.mailer ?? consoleMailer,
+    mailer: options.mailer ?? buildMailer(),
   });
   const deviceService = new DeviceService({
     pool: options.pool,

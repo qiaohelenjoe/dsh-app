@@ -1,6 +1,7 @@
 import type { AuthConfig } from '../config.js';
 import type { DbPool } from '../db/pool.js';
 import { ApiError } from '../http/errors.js';
+import { randomInt } from 'node:crypto';
 import { hashPassword, isWeakPassword, MIN_PASSWORD_LENGTH, verifyPassword } from '../security/passwords.js';
 import {
   buffersEqual,
@@ -12,6 +13,8 @@ import {
   randomUuid,
   refreshTokenExpiry,
   signAccessToken,
+  signPasswordResetToken,
+  verifyPasswordResetToken,
 } from '../security/tokens.js';
 import { writeAudit } from './repositories/audit.js';
 import {
@@ -38,6 +41,10 @@ import type { Mailer } from './mailer.js';
 import { findDeviceById } from '../devices/repositories.js';
 
 const PASSWORD_RESET_TTL_MS = 30 * 60 * 1000;
+/** 邮箱验证码有效期：10 分钟。 */
+const PASSWORD_RESET_CODE_TTL_MS = 10 * 60 * 1000;
+/** 验证码校验通过后签发的重置令牌有效期：10 分钟。 */
+const PASSWORD_RESET_TOKEN_TTL_SEC = 10 * 60;
 
 export interface RequestContext {
   ip: string | null;
@@ -556,18 +563,21 @@ export class AuthService {
     // 防用户枚举：无论邮箱是否存在都返回 202，且不透露任何差异
     if (!account || account.status !== 'active') return;
 
+    // 6 位数字验证码（10 分钟有效、一次使用）；库里只存哈希
+    const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
+    const expiresAt = new Date(Date.now() + PASSWORD_RESET_CODE_TTL_MS);
     const token = generateOpaqueToken();
-    const expiresAt = new Date(Date.now() + PASSWORD_RESET_TTL_MS);
     await createEmailToken(this.pool, {
       accountId: account.id,
       purpose: 'reset_password',
-      tokenHash: hashOpaqueToken(token, this.config.refreshPepper),
+      tokenHash: hashOpaqueToken(code, this.config.refreshPepper),
       expiresAt,
     });
 
     try {
       await this.deps.mailer.sendPasswordReset({
         email: account.email,
+        code,
         token,
         expiresAt,
         resetUrl: `${this.config.publicBaseUrl}/reset?t=${encodeURIComponent(token)}`,
@@ -585,24 +595,62 @@ export class AuthService {
     });
   }
 
+  /** 第二步：校验邮箱验证码，通过后签发 10 分钟有效的一次性重置令牌。 */
+  async verifyResetCode(email: string, code: string, context: RequestContext): Promise<{ resetToken: string }> {
+    const normalized = normalizeEmail(email);
+    const account = await findAccountByEmail(this.pool, normalized);
+    const invalid = () => new ApiError(400, 'request.invalid', '验证码不正确或已过期');
+    if (!account || account.status !== 'active') throw invalid();
+    const consumed = await consumeEmailToken(
+      this.pool,
+      hashOpaqueToken(code.trim(), this.config.refreshPepper),
+      'reset_password',
+    );
+    if (!consumed || consumed.accountId !== account.id) throw invalid();
+    const resetToken = await signPasswordResetToken(account.id, this.config.jwtSecret, PASSWORD_RESET_TOKEN_TTL_SEC);
+    await writeAudit(this.pool, {
+      accountId: account.id,
+      action: 'auth.password.reset.verify',
+      result: 'ok',
+      ip: context.ip,
+      userAgent: context.userAgent,
+    });
+    return { resetToken };
+  }
+
+  /** 第三步：用重置令牌（或旧的一键链接令牌）设置新密码，并撤销该账号全部会话。 */
   async resetPassword(
-    input: { token: string; newPassword: string },
+    input: { token?: string; resetToken?: string; newPassword: string },
     context: RequestContext,
   ): Promise<void> {
     this.assertStrongPassword(input.newPassword);
 
-    const consumed = await consumeEmailToken(
-      this.pool,
-      hashOpaqueToken(input.token, this.config.refreshPepper),
-      'reset_password',
-    );
-    if (!consumed) throw new ApiError(400, 'request.invalid', '重置令牌无效或已过期');
+    let accountId: string | null = null;
+    if (input.resetToken) {
+      try {
+        accountId = (await verifyPasswordResetToken(input.resetToken, this.config.jwtSecret)).accountId;
+      } catch {
+        throw new ApiError(400, 'request.invalid', '重置令牌无效或已过期');
+      }
+    } else if (input.token) {
+      const consumed = await consumeEmailToken(
+        this.pool,
+        hashOpaqueToken(input.token, this.config.refreshPepper),
+        'reset_password',
+      );
+      if (!consumed) throw new ApiError(400, 'request.invalid', '重置令牌无效或已过期');
+      accountId = consumed.accountId;
+    } else {
+      throw new ApiError(400, 'request.invalid', '缺少重置令牌');
+    }
 
+    if (!accountId) throw new ApiError(400, 'request.invalid', '缺少重置令牌');
+    const targetAccountId = accountId;
     const newHash = await hashPassword(input.newPassword);
-    await updateAccountPassword(this.pool, consumed.accountId, newHash);
-    const revoked = await revokeAllSessions(this.pool, consumed.accountId);
+    await updateAccountPassword(this.pool, targetAccountId, newHash);
+    const revoked = await revokeAllSessions(this.pool, targetAccountId);
     await writeAudit(this.pool, {
-      accountId: consumed.accountId,
+      accountId: targetAccountId,
       action: 'auth.password.reset',
       result: 'ok',
       ip: context.ip,

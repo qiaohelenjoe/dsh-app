@@ -3,6 +3,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 
 import '../api.dart';
 import '../theme.dart';
+import 'forgot_password_page.dart';
 
 /// 登录/注册页：邮箱 + 密码；注册成功后自动登录并进入设备列表。
 class LoginPage extends StatefulWidget {
@@ -89,6 +90,23 @@ class _LoginPageState extends State<LoginPage> {
       _error = null;
       _confirmController.clear();
     });
+  }
+
+  /// 忘记密码：进入三步页（邮箱 → 验证码 → 新密码），成功后回到登录页提示用新密码登录。
+  Future<void> _forgotPassword() async {
+    final done = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => ForgotPasswordPage(
+          api: widget.api,
+          initialEmail: _emailController.text.trim(),
+        ),
+      ),
+    );
+    if (done == true && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('密码已重置，请用新密码登录')),
+      );
+    }
   }
 
   bool _obscurePassword = true;
@@ -253,6 +271,12 @@ class _LoginPageState extends State<LoginPage> {
                     onPressed: _loading ? null : _toggleMode,
                     child: Text(_registerMode ? '已有账号？去登录' : '没有账号？注册'),
                   ),
+                  if (!_registerMode)
+                    TextButton(
+                      key: const Key('forgot-password-button'),
+                      onPressed: _loading ? null : _forgotPassword,
+                      child: const Text('忘记密码'),
+                    ),
                 ],
               ),
             ),

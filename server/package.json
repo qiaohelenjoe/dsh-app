@@ -13,19 +13,21 @@
     "typecheck": "tsc -p tsconfig.json",
     "migrate": "tsx src/db/cli.ts migrate",
     "db:version": "tsx src/db/cli.ts version",
-    "test": "node --import tsx --test test/html-rewrite.test.ts test/ws-fragment.test.ts test/download.test.ts test/db.integration.test.ts test/health.integration.test.ts test/auth.integration.test.ts test/devices.integration.test.ts test/device-code.integration.test.ts test/account.integration.test.ts test/audit.integration.test.ts test/tunnel.integration.test.ts test/tunnel-ticket.integration.test.ts test/ws-proxy.integration.test.ts test/proxy.integration.test.ts test/client-logs.integration.test.ts",
+    "test": "node --import tsx --test test/html-rewrite.test.ts test/ws-fragment.test.ts test/download.test.ts test/reset-page.test.ts test/machine-name.integration.test.ts test/db.integration.test.ts test/health.integration.test.ts test/auth.integration.test.ts test/devices.integration.test.ts test/device-code.integration.test.ts test/account.integration.test.ts test/audit.integration.test.ts test/tunnel.integration.test.ts test/tunnel-ticket.integration.test.ts test/ws-proxy.integration.test.ts test/proxy.integration.test.ts test/client-logs.integration.test.ts",
     "test:db": "node --import tsx --test test/db.integration.test.ts"
   },
   "dependencies": {
     "@node-rs/argon2": "^2.2.2",
     "fastify": "^5.2.0",
     "jose": "^6.2.13",
+    "nodemailer": "^10.5.0",
     "pg": "^8.13.1",
     "ws": "^8.22.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "@types/nodemailer": "^8.0.2",
     "@types/pg": "^8.11.10",
     "@types/ws": "^8.18.2",
     "tsx": "^4.19.2",

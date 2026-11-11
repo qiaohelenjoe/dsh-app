@@ -25,6 +25,10 @@ export interface DeviceView {
   online: boolean;
   /** 是否有活跃隧道会话（在线真值；与 online 的数据库时间窗判定互补）。 */
   connected?: boolean;
+  /** 计算机名称（如 PC-3F7A-91C2）：设备身份的稳定标识；老设备在补码前为 null。 */
+  machineName: string | null;
+  /** 自动接管老设备时，被接管那台设备的原名称（仅注册响应里有）。 */
+  adoptedFrom?: string;
   lastSeenAt: string | null;
   appVersion: string | null;
   createdAt: string;

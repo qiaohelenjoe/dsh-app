@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>重置 DSH 账号密码</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; max-width: 420px; margin: 48px auto; padding: 0 16px; line-height: 1.6; }
+    h1 { font-size: 20px; }
+    label { display: block; margin-top: 12px; font-size: 14px; }
+    input { width: 100%; padding: 8px; font-size: 16px; box-sizing: border-box; }
+    button { margin-top: 16px; padding: 10px 16px; font-size: 15px; cursor: pointer; }
+    button:disabled { opacity: 0.6; cursor: default; }
+    #status { margin-top: 16px; white-space: pre-wrap; font-size: 14px; }
+    .hint { font-size: 13px; opacity: 0.75; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <h1>重置 DSH 账号密码</h1>
+  <p class="hint">设置新的登录密码（至少 10 位，且不能是常见弱口令）。重置成功后，该账号在所有设备上的登录会话都会失效，需要用新密码重新登录。</p>
+
+  <div id="invalid" hidden>
+    <p>这个重置链接无效或已过期。请回到 DSH 桌面端面板「移动端账号 → 忘记密码」重新申请一封。</p>
+  </div>
+
+  <div id="formArea">
+    <label>新密码<input id="password" type="password" autocomplete="new-password" /></label>
+    <label>确认新密码<input id="confirm" type="password" autocomplete="new-password" /></label>
+    <button id="submit">重置密码</button>
+  </div>
+
+  <div id="status"></div>
+
+  <script>
+    var MIN_PASSWORD_LENGTH = 10;
+    var token = new URLSearchParams(location.search).get('t') || '';
+    var statusEl = document.getElementById('status');
+    var formArea = document.getElementById('formArea');
+    var invalidEl = document.getElementById('invalid');
+    var passwordEl = document.getElementById('password');
+    var confirmEl = document.getElementById('confirm');
+    var submitEl = document.getElementById('submit');
+
+    function setStatus(text) { statusEl.textContent = text; }
+
+    if (!token) {
+      formArea.hidden = true;
+      invalidEl.hidden = false;
+    }
+
+    submitEl.addEventListener('click', async function () {
+      var password = passwordEl.value;
+      var confirm = confirmEl.value;
+      if (password.length < MIN_PASSWORD_LENGTH) {
+        setStatus('密码至少 ' + MIN_PASSWORD_LENGTH + ' 位，且不能是常见弱口令');
+        return;
+      }
+      if (password !== confirm) {
+        setStatus('两次输入的密码不一致');
+        return;
+      }
+      submitEl.disabled = true;
+      setStatus('提交中…');
+      try {
+        var response = await fetch('/v1/auth/reset-password', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ token: token, newPassword: password }),
+        });
+        if (response.status === 204) {
+          formArea.hidden = true;
+          setStatus('✅ 密码已重置，请用新密码登录。');
+          return;
+        }
+        var body = await response.json().catch(function () { return {}; });
+        var message = (body && body.error && body.error.message) || ('HTTP ' + response.status);
+        setStatus('重置失败：' + message);
+      } catch (error) {
+        setStatus('网络错误：' + (error && error.message ? error.message : error));
+      } finally {
+        submitEl.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
