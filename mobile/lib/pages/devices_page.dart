@@ -50,6 +50,8 @@ class _DevicesPageState extends State<DevicesPage> with WidgetsBindingObserver {
   Timer? _pollTimer;
   bool _retrying = false;
   AppLifecycleState _lifecycle = AppLifecycleState.resumed;
+  /// 进行中的刷新：并发触发复用同一次，避免同一刷新令牌被并发使用。
+  Future<_RefreshOutcome>? _refreshInFlight;
 
   /// 前台 10 秒、后台 30 秒：前台更实时，后台省电。
   Duration get _pollInterval =>
@@ -108,10 +110,19 @@ class _DevicesPageState extends State<DevicesPage> with WidgetsBindingObserver {
     } on ApiException catch (error) {
       if (!mounted) return;
       if (error.statusCode == 401 && retryOn401) {
-        final refreshed = await _refreshSession();
-        if (refreshed) return _load(retryOn401: false, silent: silent);
-        // 刷新也失败：会话已失效，直接回登录页（不提示、不需要用户点退出）
-        await widget.onSessionExpired?.call();
+        final outcome = await _refreshSession();
+        if (outcome == _RefreshOutcome.refreshed) return _load(retryOn401: false, silent: silent);
+        if (outcome == _RefreshOutcome.revoked) {
+          // 只有服务端明确撤销/过期会话才回登录页
+          await widget.onSessionExpired?.call();
+          return;
+        }
+        // 网络/限流等临时失败：保留登录态，下次轮询自动重试
+        if (silent && _devices.isNotEmpty) return;
+        setState(() {
+          _error = '网络异常，正在自动重试…';
+          _loading = false;
+        });
         return;
       }
       if (silent && _devices.isNotEmpty) return;
@@ -149,21 +160,32 @@ class _DevicesPageState extends State<DevicesPage> with WidgetsBindingObserver {
     return true;
   }
 
-  Future<bool> _refreshSession() async {
+  Future<_RefreshOutcome> _refreshSession() {
+    final inFlight = _refreshInFlight;
+    if (inFlight != null) return inFlight;
+    final future = _doRefresh(_session.refreshToken);
+    _refreshInFlight = future;
+    return future.whenComplete(() => _refreshInFlight = null);
+  }
+
+  Future<_RefreshOutcome> _doRefresh(String refreshToken) async {
     try {
-      final refreshed = await widget.api.refresh(_session.refreshToken);
+      final refreshed = await widget.api.refresh(refreshToken);
       final next = Session(
         accessToken: refreshed.accessToken,
         refreshToken: refreshed.refreshToken,
         accountEmail: _session.accountEmail,
       );
       await widget.store.saveSession(next);
-      if (!mounted) return false;
+      if (!mounted) return _RefreshOutcome.refreshed;
       setState(() => _session = next);
       widget.onSessionRefreshed(next);
-      return true;
+      return _RefreshOutcome.refreshed;
+    } on ApiException catch (error) {
+      // 401：刷新令牌失效/被撤销，需要重新登录；其它（429/5xx/网络）属临时失败，不登出
+      return error.statusCode == 401 ? _RefreshOutcome.revoked : _RefreshOutcome.transient;
     } catch (_) {
-      return false;
+      return _RefreshOutcome.transient;
     }
   }
 
@@ -173,8 +195,12 @@ class _DevicesPageState extends State<DevicesPage> with WidgetsBindingObserver {
       return await action();
     } on ApiException catch (error) {
       if (error.statusCode != 401) rethrow;
-      final refreshed = await _refreshSession();
-      if (!refreshed) rethrow;
+      final outcome = await _refreshSession();
+      if (outcome == _RefreshOutcome.revoked) {
+        await widget.onSessionExpired?.call();
+        rethrow;
+      }
+      if (outcome != _RefreshOutcome.refreshed) rethrow;
       return action();
     }
   }
@@ -619,3 +645,6 @@ class _RenameDialogState extends State<_RenameDialog> {
     );
   }
 }
+
+/// 刷新结果：区分「需要重新登录」与「临时失败（网络/限流/服务端异常）」。
+enum _RefreshOutcome { refreshed, revoked, transient }

@@ -74,7 +74,7 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
   app.post('/v1/auth/refresh', async (request, reply) => {
     const body = refreshSchema.parse(request.body);
     const parsed = parseRefreshToken(body.refreshToken);
-    if (parsed) enforceLimit(deps.limiter, `refresh:session:${parsed.sessionId}`, 60, 60 * 60 * 1000);
+    if (parsed) enforceLimit(deps.limiter, `refresh:session:${parsed.sessionId}`, 120, 60 * 60 * 1000);
     const result = await deps.auth.refresh(body.refreshToken, requestContext(request));
     return reply.code(200).send(result);
   });

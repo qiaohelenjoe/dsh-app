@@ -135,8 +135,9 @@ describe('认证 API（T02）', () => {
     }
   });
 
-  test('refresh 轮换：旧令牌复用返回 401 auth.token_reuse 并撤销该会话', async () => {
-    const ctx = await createAuthTestContext();
+  test('refresh 轮换：超出宽限期复用旧令牌返回 401 auth.token_reuse 并撤销该会话', async () => {
+    // 宽限期设为 0，等价于关闭并发宽限：复用旧令牌立即按盗用处理
+    const ctx = await createAuthTestContext({ refreshReuseGraceSeconds: 0 });
     try {
       await register(ctx);
       const loginBody = (await login(ctx)).json() as LoginBody;
@@ -166,6 +167,51 @@ describe('认证 API（T02）', () => {
       });
       assert.equal(afterRevoke.statusCode, 401);
       assert.equal((afterRevoke.json() as ErrorBody).error.code, 'auth.token_invalid');
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  test('并发刷新宽限期：上一代令牌重放返回 200、不撤销会话，双方令牌都继续有效', async () => {
+    const ctx = await createAuthTestContext();
+    try {
+      await register(ctx);
+      const loginBody = (await login(ctx)).json() as LoginBody;
+
+      const rotated = await ctx.app.inject({
+        method: 'POST',
+        url: '/v1/auth/refresh',
+        payload: { refreshToken: loginBody.refreshToken },
+      });
+      assert.equal(rotated.statusCode, 200);
+      const fresh = rotated.json() as { accessToken: string; refreshToken: string };
+      assert.notEqual(fresh.refreshToken, loginBody.refreshToken);
+
+      // 模拟"另一个页面/进程"拿着同一枚旧令牌同时刷新：宽限期内允许，不撤销会话
+      const replay = await ctx.app.inject({
+        method: 'POST',
+        url: '/v1/auth/refresh',
+        payload: { refreshToken: loginBody.refreshToken },
+      });
+      assert.equal(replay.statusCode, 200);
+      const replayBody = replay.json() as { accessToken: string; refreshToken: string };
+      assert.equal(replayBody.refreshToken, loginBody.refreshToken, '宽限期内不轮换，原样返回');
+
+      // 旧令牌换来的 access token 可用
+      const account = await ctx.app.inject({
+        method: 'GET',
+        url: '/v1/account',
+        headers: { authorization: `Bearer ${replayBody.accessToken}` },
+      });
+      assert.equal(account.statusCode, 200);
+
+      // 新令牌也仍然有效（没有被撤销）
+      const next = await ctx.app.inject({
+        method: 'POST',
+        url: '/v1/auth/refresh',
+        payload: { refreshToken: fresh.refreshToken },
+      });
+      assert.equal(next.statusCode, 200);
     } finally {
       await ctx.close();
     }

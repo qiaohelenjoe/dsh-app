@@ -154,7 +154,7 @@ export function registerWebLoginRoutes(app: FastifyInstance, deps: WebLoginRoute
   app.post('/v1/auth/web-session', async (request, reply) => {
     const body = refreshSchema.parse(request.body);
     const parsed = parseRefreshToken(body.refreshToken);
-    if (parsed) enforceLimit(deps.limiter, `refresh:session:${parsed.sessionId}`, 60, 60 * 60 * 1000);
+    if (parsed) enforceLimit(deps.limiter, `refresh:session:${parsed.sessionId}`, 120, 60 * 60 * 1000);
     const result = await deps.auth.createWebSession(body.refreshToken, requestContext(request));
     const cookie = await signAccessToken(
       { accountId: result.accountId, sessionId: result.sessionId },

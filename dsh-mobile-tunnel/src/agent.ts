@@ -84,6 +84,8 @@ export class TunnelAgent {
   private tunnel: TunnelClient | null = null;
   private state: AccountCardState;
   private stopped = false;
+  /** 刷新中的 Promise：并发调用复用它，避免同一刷新令牌被并发使用而触发服务端撤销。 */
+  private refreshInFlight: Promise<string | null> | null = null;
   private readonly listeners = new Set<(event: unknown) => void>();
 
   constructor(
@@ -405,6 +407,35 @@ export class TunnelAgent {
     }
   }
 
+  /** 刷新令牌单飞：并发调用共享同一次刷新，成功后落盘。 */
+  private async refreshCredentials(): Promise<string | null> {
+    if (this.refreshInFlight) return this.refreshInFlight;
+    const current = this.credentials;
+    if (!current) return null;
+    const run = (async () => {
+      try {
+        const refreshed = await refreshTokens(
+          this.config.serverBaseUrl,
+          current.refreshToken,
+          this.deps.fetchImpl ?? fetch,
+        );
+        this.credentials = {
+          ...current,
+          accessToken: refreshed.accessToken,
+          refreshToken: refreshed.refreshToken,
+        };
+        await this.deps.store.save(this.credentials);
+        return refreshed.accessToken;
+      } catch (error) {
+        this.deps.log?.(`[agent] 刷新令牌失败：${(error as Error).message}`);
+        return null;
+      } finally {
+        this.refreshInFlight = null;
+      }
+    })();
+    this.refreshInFlight = run;
+    return run;
+  }
   private startTunnel(): void {
     if (!this.credentials) return;
     const credentials = this.credentials;
@@ -427,23 +458,7 @@ export class TunnelAgent {
       serverBaseUrl: this.config.serverBaseUrl,
       deviceId: credentials.deviceId,
       getAccessToken: async () => this.credentials?.accessToken ?? null,
-      refreshAccessToken: async () => {
-        const current = this.credentials;
-        if (!current) return null;
-        try {
-          const refreshed = await refreshTokens(this.config.serverBaseUrl, current.refreshToken, fetchImpl);
-          this.credentials = {
-            ...current,
-            accessToken: refreshed.accessToken,
-            refreshToken: refreshed.refreshToken,
-          };
-          await this.deps.store.save(this.credentials);
-          return refreshed.accessToken;
-        } catch (error) {
-          this.deps.log?.(`[agent] 刷新令牌失败：${(error as Error).message}`);
-          return null;
-        }
-      },
+      refreshAccessToken: () => this.refreshCredentials(),
       forwardLocalRequest,
       openLocalWebSocket: (input) => this.openLocalWebSocket(input, cookieProvider),
       getTunnelTicket: async (accessToken) => {

@@ -38,7 +38,7 @@
 |---|---|
 | `POST /v1/auth/login` | 5 次/分钟/IP + 10 次/小时/账号 |
 | `POST /v1/auth/register` | 3 次/小时/IP |
-| `POST /v1/auth/refresh` | 60 次/小时/会话 |
+| `POST /v1/auth/refresh` | 120 次/小时/会话 |
 | `POST /v1/devices` | 20 次/小时/账号 |
 | `WSS /v1/tunnel` | 10 次/分钟/设备 |
 
@@ -140,7 +140,9 @@ POST /v1/auth/refresh
 ```
 
 - 旧 refresh 立即作废（轮换）
-- **检测到旧令牌被复用**：撤销该会话全部令牌，返回 `401 auth.token_reuse`，并写审计日志
+- **并发刷新宽限**：上一代 refresh 在宽限期（`REFRESH_REUSE_GRACE_SECONDS`，默认 120 秒）内重放时，返回 `200` 且**原样返回同一枚 refresh**（不轮换、宽限时间滑动），不会撤销会话；用于抵消多页面/多进程同时刷新的误判
+- **超出宽限检测到旧令牌被复用**：撤销该会话全部令牌，返回 `401 auth.token_reuse`，并写审计日志
+- 限流：`120 次/小时/会话`
 
 ### 1.4 登出
 
