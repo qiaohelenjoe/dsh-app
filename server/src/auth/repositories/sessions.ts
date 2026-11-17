@@ -6,6 +6,10 @@ export interface SessionRow {
   /** 网页会话（PC 账号面板）不绑定设备，因此可空。 */
   device_id: string | null;
   refresh_token_hash: Buffer;
+  /** 上一代刷新令牌哈希：并发刷新宽限期内允许重放（迁移 0007）。 */
+  prev_refresh_token_hash: Buffer | null;
+  /** 上一代刷新令牌最近一次被使用的时间（滑动宽限）。 */
+  prev_refresh_used_at: Date | null;
   expires_at: Date;
   created_at: Date;
   last_used_at: Date;
@@ -60,7 +64,11 @@ export async function rotateSessionRefresh(
 ): Promise<boolean> {
   const result = await pool.query(
     `UPDATE sessions
-        SET refresh_token_hash = $2, expires_at = $3, last_used_at = now()
+        SET prev_refresh_token_hash = refresh_token_hash,
+            prev_refresh_used_at = now(),
+            refresh_token_hash = $2,
+            expires_at = $3,
+            last_used_at = now()
       WHERE id = $1 AND revoked_at IS NULL AND expires_at > now()
       RETURNING id`,
     [sessionId, newRefreshHash, newExpiresAt],
@@ -68,6 +76,14 @@ export async function rotateSessionRefresh(
   return result.rowCount === 1;
 }
 
+/** 宽限期内的重放：只滑动宽限时间，不轮换、不撤销。 */
+export async function touchPrevRefresh(pool: DbPool, sessionId: string): Promise<void> {
+  await pool.query(
+    `UPDATE sessions SET prev_refresh_used_at = now(), last_used_at = now()
+      WHERE id = $1 AND revoked_at IS NULL`,
+    [sessionId],
+  );
+}
 export async function revokeSession(pool: DbPool, sessionId: string): Promise<void> {
   await pool.query('UPDATE sessions SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL', [sessionId]);
 }

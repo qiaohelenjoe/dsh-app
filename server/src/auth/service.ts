@@ -36,6 +36,7 @@ import {
   revokeOtherSessions,
   revokeSession,
   rotateSessionRefresh,
+  touchPrevRefresh,
 } from './repositories/sessions.js';
 import type { Mailer } from './mailer.js';
 import { findDeviceById } from '../devices/repositories.js';
@@ -394,7 +395,44 @@ export class AuthService {
 
     const presentedHash = hashRefreshSecret(parsed.secret, this.config.refreshPepper);
     if (!buffersEqual(session.refresh_token_hash, presentedHash)) {
-      // 复用已被轮换的旧令牌：撤销该会话全部令牌并审计
+      // 并发刷新宽限：客户端可能在多个页面/进程中同时刷新，同一枚令牌会被短暂重放。
+      // 上一代令牌在宽限期内允许继续换 access token（不轮换、宽限时间滑动），避免误撤销整条会话。
+      const graceMs = (this.config.refreshReuseGraceSeconds ?? 120) * 1000;
+      const prevHash = session.prev_refresh_token_hash ?? null;
+      const prevUsedAt = session.prev_refresh_used_at ?? null;
+      const withinGrace =
+        prevHash !== null &&
+        buffersEqual(prevHash, presentedHash) &&
+        prevUsedAt !== null &&
+        Date.now() - prevUsedAt.getTime() <= graceMs;
+      if (withinGrace) {
+        const account = await findAccountById(this.pool, session.account_id);
+        if (!account || account.status !== 'active') {
+          throw new ApiError(403, 'authz.account_suspended', '账号已停用');
+        }
+        await touchPrevRefresh(this.pool, session.id);
+        const accessToken = await signAccessToken(
+          { accountId: account.id, sessionId: session.id },
+          this.config.jwtSecret,
+          this.config.accessTokenTtlSeconds,
+        );
+        await writeAudit(this.pool, {
+          accountId: account.id,
+          deviceId: session.device_id,
+          action: 'auth.refresh.grace',
+          result: 'ok',
+          ip: context.ip,
+          userAgent: context.userAgent,
+          detail: { sessionId: session.id },
+        });
+        // 原样返回同一枚 refresh：不轮换，双方手里的令牌都继续有效
+        return {
+          accessToken,
+          refreshToken,
+          expiresIn: this.config.accessTokenTtlSeconds,
+        };
+      }
+      // 复用已被轮换的旧令牌（超出宽限）：撤销该会话全部令牌并审计
       await revokeSession(this.pool, session.id);
       await writeAudit(this.pool, {
         accountId: session.account_id,
