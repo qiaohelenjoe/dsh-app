@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # DSH 账号服务每日备份：pg_dump 压缩 + 保留 14 天
-# 用法：/opt/dsh-account/deploy/backup.sh
+# 用法：<部署目录>/deploy/backup.sh
 set -euo pipefail
 cd "$(dirname "$0")"
-BACKUP_DIR="${BACKUP_DIR:-/opt/dsh-account/backups}"
+ROOT_DIR="$(cd .. && pwd)"
+BACKUP_DIR="${BACKUP_DIR:-$ROOT_DIR/backups}"
 mkdir -p "$BACKUP_DIR"
 STAMP=$(date +%Y%m%d_%H%M%S)
 FILE="$BACKUP_DIR/dsh-account-$STAMP.sql.gz"

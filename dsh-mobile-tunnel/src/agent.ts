@@ -76,6 +76,8 @@ export interface TunnelAgentDeps {
   onStateChange?: (state: AccountCardState) => void;
   log?: (message: string) => void;
   backoffBaseMs?: number;
+  /** 本机面板会话（用于刷新令牌失效时自动重新登记设备）。 */
+  panelSession?: () => Promise<{ accessToken: string; refreshToken: string; email: string } | null>;
 }
 
 /** 插件运行时：登录/登出、凭据恢复、隧道生命周期与状态卡片。 */
@@ -86,6 +88,10 @@ export class TunnelAgent {
   private stopped = false;
   /** 刷新中的 Promise：并发调用复用它，避免同一刷新令牌被并发使用而触发服务端撤销。 */
   private refreshInFlight: Promise<string | null> | null = null;
+  /** 被服务端限流（429 + Retry-After）时的冷却截止时间。 */
+  private cooldownUntil = 0;
+  /** 自动恢复（用面板会话重新登记）进行中，避免递归。 */
+  private readopting = false;
   private readonly listeners = new Set<(event: unknown) => void>();
 
   constructor(
@@ -412,6 +418,7 @@ export class TunnelAgent {
     if (this.refreshInFlight) return this.refreshInFlight;
     const current = this.credentials;
     if (!current) return null;
+    if (Date.now() < this.cooldownUntil) return null;
     const run = (async () => {
       try {
         const refreshed = await refreshTokens(
@@ -427,7 +434,29 @@ export class TunnelAgent {
         await this.deps.store.save(this.credentials);
         return refreshed.accessToken;
       } catch (error) {
-        this.deps.log?.(`[agent] 刷新令牌失败：${(error as Error).message}`);
+        const failure = error as Error & { status?: number; retryAfterSec?: number };
+        if (failure.status === 429) {
+          // 被限流：按 Retry-After 冷却，冷却期内不再发任何刷新请求，避免形成死循环
+          const seconds = Math.max(30, failure.retryAfterSec ?? 60);
+          this.cooldownUntil = Date.now() + seconds * 1000;
+          this.deps.log?.(`[agent] 刷新被限流，${seconds} 秒后重试`);
+          return null;
+        }
+        if (failure.status === 401) {
+          // 刷新令牌失效（会话被撤销/过期）：用面板会话自动重新登记，恢复隧道
+          const healed = await this.reAdoptWithPanelSession();
+          if (healed) return healed;
+          this.deps.log?.('[agent] 登录已失效且无法自动恢复，请打开「移动端」面板重新登录');
+          this.setState({
+            status: 'error',
+            deviceName: this.config.deviceName,
+            message: '登录已失效，请打开「移动端」面板重新登录',
+          });
+          this.tunnel?.stop();
+          this.tunnel = null;
+          return null;
+        }
+        this.deps.log?.(`[agent] 刷新令牌失败：${failure.message}`);
         return null;
       } finally {
         this.refreshInFlight = null;
@@ -435,6 +464,39 @@ export class TunnelAgent {
     })();
     this.refreshInFlight = run;
     return run;
+  }
+
+  /** access token 是否在 seconds 秒内过期（解析 JWT exp；无法解析时按已过期处理）。 */
+  private tokenExpiresWithin(token: string, seconds: number): boolean {
+    const payload = token.split('.')[1];
+    if (!payload) return true;
+    try {
+      const json = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as { exp?: number };
+      if (!json.exp) return true;
+      return json.exp * 1000 - Date.now() <= seconds * 1000;
+    } catch {
+      return true;
+    }
+  }
+
+  /** 刷新令牌失效时用本机面板会话重新登记设备（自愈），返回新的 access token。 */
+  private async reAdoptWithPanelSession(): Promise<string | null> {
+    if (this.readopting) return null;
+    const provider = this.deps.panelSession;
+    if (!provider) return null;
+    this.readopting = true;
+    try {
+      const session = await provider();
+      if (!session) return null;
+      await this.adoptPanelSession(session);
+      this.deps.log?.('[agent] 已用面板会话重新登记本机设备');
+      return this.credentials?.accessToken ?? null;
+    } catch (error) {
+      this.deps.log?.(`[agent] 自动恢复失败：${(error as Error).message}`);
+      return null;
+    } finally {
+      this.readopting = false;
+    }
   }
   private startTunnel(): void {
     if (!this.credentials) return;
@@ -457,7 +519,18 @@ export class TunnelAgent {
     this.tunnel = new TunnelClient({
       serverBaseUrl: this.config.serverBaseUrl,
       deviceId: credentials.deviceId,
-      getAccessToken: async () => this.credentials?.accessToken ?? null,
+      getAccessToken: async () => {
+        const current = this.credentials;
+        if (!current) return null;
+        if (Date.now() < this.cooldownUntil) return null;
+        // 主动续期：快过期时先刷新，避免拿过期令牌换票据（401 → 重试循环）
+        if (this.tokenExpiresWithin(current.accessToken, 120)) {
+          const refreshed = await this.refreshCredentials();
+          if (refreshed) return refreshed;
+          return this.tokenExpiresWithin(current.accessToken, 0) ? null : current.accessToken;
+        }
+        return current.accessToken;
+      },
       refreshAccessToken: () => this.refreshCredentials(),
       forwardLocalRequest,
       openLocalWebSocket: (input) => this.openLocalWebSocket(input, cookieProvider),

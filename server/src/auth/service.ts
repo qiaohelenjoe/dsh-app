@@ -35,8 +35,6 @@ import {
   revokeAllSessions,
   revokeOtherSessions,
   revokeSession,
-  rotateSessionRefresh,
-  touchPrevRefresh,
 } from './repositories/sessions.js';
 import type { Mailer } from './mailer.js';
 import { findDeviceById } from '../devices/repositories.js';
@@ -394,56 +392,17 @@ export class AuthService {
     if (!session) throw new ApiError(401, 'auth.token_invalid', '刷新令牌无效');
 
     const presentedHash = hashRefreshSecret(parsed.secret, this.config.refreshPepper);
+    let usingPrevGeneration = false;
     if (!buffersEqual(session.refresh_token_hash, presentedHash)) {
-      // 并发刷新宽限：客户端可能在多个页面/进程中同时刷新，同一枚令牌会被短暂重放。
-      // 上一代令牌在宽限期内允许继续换 access token（不轮换、宽限时间滑动），避免误撤销整条会话。
-      const graceMs = (this.config.refreshReuseGraceSeconds ?? 120) * 1000;
+      // 刷新令牌已停止轮换；但历史轮换期间发出的"上一代"令牌仍可能握在客户端手里，
+      // 直接拒绝会让这些客户端陷入"401 → 重试 → 429"死循环。这里接受上一代令牌：
+      // 不轮换、原样返回，会话保持不变（仅用于兼容迁移，不扩大其他权限）。
       const prevHash = session.prev_refresh_token_hash ?? null;
-      const prevUsedAt = session.prev_refresh_used_at ?? null;
-      const withinGrace =
-        prevHash !== null &&
-        buffersEqual(prevHash, presentedHash) &&
-        prevUsedAt !== null &&
-        Date.now() - prevUsedAt.getTime() <= graceMs;
-      if (withinGrace) {
-        const account = await findAccountById(this.pool, session.account_id);
-        if (!account || account.status !== 'active') {
-          throw new ApiError(403, 'authz.account_suspended', '账号已停用');
-        }
-        await touchPrevRefresh(this.pool, session.id);
-        const accessToken = await signAccessToken(
-          { accountId: account.id, sessionId: session.id },
-          this.config.jwtSecret,
-          this.config.accessTokenTtlSeconds,
-        );
-        await writeAudit(this.pool, {
-          accountId: account.id,
-          deviceId: session.device_id,
-          action: 'auth.refresh.grace',
-          result: 'ok',
-          ip: context.ip,
-          userAgent: context.userAgent,
-          detail: { sessionId: session.id },
-        });
-        // 原样返回同一枚 refresh：不轮换，双方手里的令牌都继续有效
-        return {
-          accessToken,
-          refreshToken,
-          expiresIn: this.config.accessTokenTtlSeconds,
-        };
+      if (prevHash !== null && buffersEqual(prevHash, presentedHash)) {
+        usingPrevGeneration = true;
+      } else {
+        throw new ApiError(401, 'auth.token_invalid', '刷新令牌无效');
       }
-      // 复用已被轮换的旧令牌（超出宽限）：撤销该会话全部令牌并审计
-      await revokeSession(this.pool, session.id);
-      await writeAudit(this.pool, {
-        accountId: session.account_id,
-        deviceId: session.device_id,
-        action: 'auth.token.reuse',
-        result: 'denied',
-        ip: context.ip,
-        userAgent: context.userAgent,
-        detail: { sessionId: session.id },
-      });
-      throw new ApiError(401, 'auth.token_reuse', '刷新令牌已被使用，请重新登录');
     }
 
     if (session.revoked_at !== null) {
@@ -458,18 +417,6 @@ export class AuthService {
       throw new ApiError(403, 'authz.account_suspended', '账号已停用');
     }
 
-    const nextRefresh = generateRefreshToken(session.id);
-    const rotated = await rotateSessionRefresh(
-      this.pool,
-      session.id,
-      hashRefreshSecret(nextRefresh.secret, this.config.refreshPepper),
-      refreshTokenExpiry(this.config.refreshTokenTtlDays),
-    );
-    if (!rotated) {
-      await revokeSession(this.pool, session.id);
-      throw new ApiError(401, 'auth.token_reuse', '刷新令牌已被并发使用，请重新登录');
-    }
-
     const accessToken = await signAccessToken(
       { accountId: account.id, sessionId: session.id },
       this.config.jwtSecret,
@@ -479,16 +426,17 @@ export class AuthService {
     await writeAudit(this.pool, {
       accountId: account.id,
       deviceId: session.device_id,
-      action: 'auth.refresh.success',
+      action: usingPrevGeneration ? 'auth.refresh.grace' : 'auth.refresh.success',
       result: 'ok',
       ip: context.ip,
       userAgent: context.userAgent,
-      detail: { sessionId: session.id },
+      detail: { sessionId: session.id, ...(usingPrevGeneration ? { prevGeneration: true } : {}) },
     });
 
+    // 原样返回同一枚 refresh：不轮换
     return {
       accessToken,
-      refreshToken: nextRefresh.token,
+      refreshToken,
       expiresIn: this.config.accessTokenTtlSeconds,
     };
   }

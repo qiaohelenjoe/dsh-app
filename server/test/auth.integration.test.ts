@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { SignJWT } from 'jose';
+import { hashRefreshSecret } from '../src/security/tokens.js';
 import {
   createAuthTestContext,
   makeTestAuthConfig,
@@ -135,83 +136,114 @@ describe('认证 API（T02）', () => {
     }
   });
 
-  test('refresh 轮换：超出宽限期复用旧令牌返回 401 auth.token_reuse 并撤销该会话', async () => {
-    // 宽限期设为 0，等价于关闭并发宽限：复用旧令牌立即按盗用处理
-    const ctx = await createAuthTestContext({ refreshReuseGraceSeconds: 0 });
-    try {
-      await register(ctx);
-      const loginBody = (await login(ctx)).json() as LoginBody;
-
-      const rotated = await ctx.app.inject({
-        method: 'POST',
-        url: '/v1/auth/refresh',
-        payload: { refreshToken: loginBody.refreshToken },
-      });
-      assert.equal(rotated.statusCode, 200);
-      const fresh = rotated.json() as { accessToken: string; refreshToken: string };
-      assert.notEqual(fresh.refreshToken, loginBody.refreshToken);
-
-      const reuse = await ctx.app.inject({
-        method: 'POST',
-        url: '/v1/auth/refresh',
-        payload: { refreshToken: loginBody.refreshToken },
-      });
-      assert.equal(reuse.statusCode, 401);
-      assert.equal((reuse.json() as ErrorBody).error.code, 'auth.token_reuse');
-
-      // 会话已被整体撤销：新 refresh 也失效
-      const afterRevoke = await ctx.app.inject({
-        method: 'POST',
-        url: '/v1/auth/refresh',
-        payload: { refreshToken: fresh.refreshToken },
-      });
-      assert.equal(afterRevoke.statusCode, 401);
-      assert.equal((afterRevoke.json() as ErrorBody).error.code, 'auth.token_invalid');
-    } finally {
-      await ctx.close();
-    }
-  });
-
-  test('并发刷新宽限期：上一代令牌重放返回 200、不撤销会话，双方令牌都继续有效', async () => {
+  test('refresh 不轮换：同一枚 refresh 可反复使用，不撤销会话', async () => {
     const ctx = await createAuthTestContext();
     try {
       await register(ctx);
       const loginBody = (await login(ctx)).json() as LoginBody;
 
-      const rotated = await ctx.app.inject({
+      const first = await ctx.app.inject({
         method: 'POST',
         url: '/v1/auth/refresh',
         payload: { refreshToken: loginBody.refreshToken },
       });
-      assert.equal(rotated.statusCode, 200);
-      const fresh = rotated.json() as { accessToken: string; refreshToken: string };
-      assert.notEqual(fresh.refreshToken, loginBody.refreshToken);
+      assert.equal(first.statusCode, 200);
+      const firstBody = first.json() as { accessToken: string; refreshToken: string };
+      assert.equal(firstBody.refreshToken, loginBody.refreshToken, '刷新令牌保持不变');
 
-      // 模拟"另一个页面/进程"拿着同一枚旧令牌同时刷新：宽限期内允许，不撤销会话
-      const replay = await ctx.app.inject({
+      // 同一枚令牌反复刷新（并发/多页面场景）不应被判定为盗用
+      const second = await ctx.app.inject({
         method: 'POST',
         url: '/v1/auth/refresh',
         payload: { refreshToken: loginBody.refreshToken },
       });
-      assert.equal(replay.statusCode, 200);
-      const replayBody = replay.json() as { accessToken: string; refreshToken: string };
-      assert.equal(replayBody.refreshToken, loginBody.refreshToken, '宽限期内不轮换，原样返回');
+      assert.equal(second.statusCode, 200);
+      const secondBody = second.json() as { accessToken: string };
+      assert.equal((second.json() as { refreshToken: string }).refreshToken, loginBody.refreshToken);
 
-      // 旧令牌换来的 access token 可用
+      // 会话仍然有效
       const account = await ctx.app.inject({
         method: 'GET',
         url: '/v1/account',
-        headers: { authorization: `Bearer ${replayBody.accessToken}` },
+        headers: { authorization: `Bearer ${secondBody.accessToken}` },
+      });
+      assert.equal(account.statusCode, 200);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  test('并发刷新同一令牌：两次都返回 200，不撤销会话', async () => {
+    const ctx = await createAuthTestContext();
+    try {
+      await register(ctx);
+      const loginBody = (await login(ctx)).json() as LoginBody;
+
+      const [a, b] = await Promise.all([
+        ctx.app.inject({
+          method: 'POST',
+          url: '/v1/auth/refresh',
+          payload: { refreshToken: loginBody.refreshToken },
+        }),
+        ctx.app.inject({
+          method: 'POST',
+          url: '/v1/auth/refresh',
+          payload: { refreshToken: loginBody.refreshToken },
+        }),
+      ]);
+      assert.equal(a.statusCode, 200);
+      assert.equal(b.statusCode, 200);
+
+      // 会话没有被撤销：再刷新一次仍然成功
+      const again = await ctx.app.inject({
+        method: 'POST',
+        url: '/v1/auth/refresh',
+        payload: { refreshToken: loginBody.refreshToken },
+      });
+      assert.equal(again.statusCode, 200);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  test('上一代 refresh 令牌（历史轮换遗留）仍可换 access token，不撤销会话', async () => {
+    const ctx = await createAuthTestContext();
+    try {
+      await register(ctx);
+      const loginBody = (await login(ctx)).json() as LoginBody;
+      const sessionId = decodeJwtPayload(loginBody.accessToken)['sid'] as string;
+
+      // 模拟历史轮换留下的上一代令牌：prev 哈希指向它，当前哈希仍是登录时那枚
+      const oldSecret = 'legacy-secret-from-old-rotation';
+      const oldToken = `rt_${sessionId}_${oldSecret}`;
+      await ctx.pool.query(
+        'UPDATE sessions SET prev_refresh_token_hash = $1, prev_refresh_used_at = now() WHERE id = $2',
+        [hashRefreshSecret(oldSecret, makeTestAuthConfig().refreshPepper), sessionId],
+      );
+
+      const refreshed = await ctx.app.inject({
+        method: 'POST',
+        url: '/v1/auth/refresh',
+        payload: { refreshToken: oldToken },
+      });
+      assert.equal(refreshed.statusCode, 200);
+      const body = refreshed.json() as { accessToken: string; refreshToken: string };
+      assert.equal(body.refreshToken, oldToken, '原样返回，不轮换');
+
+      const account = await ctx.app.inject({
+        method: 'GET',
+        url: '/v1/account',
+        headers: { authorization: `Bearer ${body.accessToken}` },
       });
       assert.equal(account.statusCode, 200);
 
-      // 新令牌也仍然有效（没有被撤销）
-      const next = await ctx.app.inject({
+      // 当前令牌仍然可用（会话未被撤销/未被替换）
+      const current = await ctx.app.inject({
         method: 'POST',
         url: '/v1/auth/refresh',
-        payload: { refreshToken: fresh.refreshToken },
+        payload: { refreshToken: loginBody.refreshToken },
       });
-      assert.equal(next.statusCode, 200);
+      assert.equal(current.statusCode, 200);
     } finally {
       await ctx.close();
     }
