@@ -12,8 +12,6 @@ export interface AuthConfig {
   refreshPepper: string;
   accessTokenTtlSeconds: number;
   refreshTokenTtlDays: number;
-  /** 刷新令牌并发重放的宽限秒数（默认 120）。 */
-  refreshReuseGraceSeconds?: number;
   emailVerificationEnabled: boolean;
   weakPasswordListPath: string;
   publicBaseUrl: string;
@@ -97,10 +95,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   }
 
   const refreshTokenTtlDays = Number(env.REFRESH_TOKEN_TTL_DAYS ?? '30');
-  const refreshReuseGraceSeconds = Number(env.REFRESH_REUSE_GRACE_SECONDS ?? '120');
-  if (!Number.isInteger(refreshReuseGraceSeconds) || refreshReuseGraceSeconds < 0) {
-    throw new Error(`环境变量 REFRESH_REUSE_GRACE_SECONDS 非法：${env.REFRESH_REUSE_GRACE_SECONDS}`);
-  }
   if (!Number.isInteger(refreshTokenTtlDays) || refreshTokenTtlDays <= 0) {
     throw new Error(`环境变量 REFRESH_TOKEN_TTL_DAYS 非法：${env.REFRESH_TOKEN_TTL_DAYS}`);
   }
@@ -123,7 +117,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       refreshPepper,
       accessTokenTtlSeconds,
       refreshTokenTtlDays,
-      refreshReuseGraceSeconds,
       emailVerificationEnabled: env.EMAIL_VERIFICATION_ENABLED === 'true',
       weakPasswordListPath: env.WEAK_PASSWORD_LIST_PATH?.trim() || defaultWeakPasswordListPath(),
       publicBaseUrl: env.PUBLIC_BASE_URL?.trim() || 'http://127.0.0.1:8787',

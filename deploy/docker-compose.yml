@@ -39,15 +39,15 @@ services:
       HOST: 0.0.0.0
       PORT: 8787
       MIGRATIONS_DIR: /app/migrations
-      # 手机 App 安装包目录（宿主机 downloads/ 挂载，下载页与文件下载都读它）
+        手机 App 安装包目录（宿主机 downloads/ 挂载，下载页与文件下载都读它）
       APK_DIR: /app/apk
       TZ: Asia/Shanghai
       ALLOW_TUNNEL_BEARER: "false"
     volumes:
-      # 生产为 /opt/dsh-account/downloads（与 deploy/ 同级）
+      # 生产为 <部署目录>/downloads（与 deploy/ 同级）
       - ../downloads:/app/apk:ro
     ports:
-      # 仅本机回环：由宿主机 nginx 终止 TLS 并反代
+        仅本机回环：由宿主机 nginx 终止 TLS 并反代
       - "127.0.0.1:${SERVER_PORT:-8787}:8787"
     logging:
       driver: json-file

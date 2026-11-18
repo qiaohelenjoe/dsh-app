@@ -99,8 +99,15 @@ export async function registerDevice(options) {
 }
 export async function refreshTokens(serverBaseUrl, refreshToken, fetchImpl = fetch) {
     const response = await postJson(fetchImpl, apiUrl(serverBaseUrl, '/v1/auth/refresh'), { refreshToken });
-    if (response.status !== 200)
-        throw new Error(`刷新令牌失败（HTTP ${response.status}）`);
+    if (response.status !== 200) {
+        const detail = await response.text().catch(() => '');
+        const error = new Error(`刷新令牌失败（HTTP ${response.status}）${detail ? `：${detail.slice(0, 200)}` : ''}`);
+        error.status = response.status;
+        const retryAfter = Number(response.headers.get('retry-after'));
+        if (Number.isFinite(retryAfter) && retryAfter > 0)
+            error.retryAfterSec = retryAfter;
+        throw error;
+    }
     return (await response.json());
 }
 /**

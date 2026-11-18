@@ -41,13 +41,13 @@ docker compose down -v
 TS=$(date +%Y%m%d_%H%M%S)
 tar czf /root/nginx-BACKUP-$TS.tar.gz /etc/nginx/nginx.conf /etc/nginx/conf.d /etc/nginx/snippets
 
-# 1) 上传代码到 /opt/dsh-account（server/ 与 deploy/）
+# 1) 上传代码到 <部署目录>（server/ 与 deploy/）
 #    可用 tar 上传后在服务器解压，例如：
 #    tar czf dsh-account.tar.gz server deploy -C <workspace>
-#    scp dsh-account.tar.gz root@<生产服务器IP>:/tmp/ && ssh ... 'tar xzf /tmp/dsh-account.tar.gz -C /opt/dsh-account'
+#    scp dsh-account.tar.gz root@<生产服务器IP>:/tmp/ && ssh ... 'tar xzf /tmp/dsh-account.tar.gz -C <部署目录>'
 
 # 2) 生成 .env（随机密钥）
-cd /opt/dsh-account/deploy
+cd <部署目录>/deploy
 cp .env.example .env
 sed -i "s|change-me-strong-random-password|$(openssl rand -hex 24)|" .env
 sed -i "s|change-me-random-32-chars-secret|$(openssl rand -hex 32)|" .env
@@ -61,7 +61,7 @@ curl -s http://127.0.0.1:8787/healthz
 
 # 4) nginx 站点（从模板生成：替换域名与证书片段路径）
 sed 's/example.com/dsh.hbzxht.com/g; s#/etc/nginx/snippets/ssl.conf#/etc/nginx/snippets/ssl-wildcard.conf#' \
-  /opt/dsh-account/deploy/nginx/example.com.conf > /etc/nginx/conf.d/dsh.hbzxht.com.conf
+  <部署目录>/deploy/nginx/example.com.conf > /etc/nginx/conf.d/dsh.hbzxht.com.conf
 /usr/local/nginx/sbin/nginx -t && /usr/local/nginx/sbin/nginx -s reload
 
 # 5) 外网验证（健康检查只允许本机访问，外网应为 403）
@@ -74,11 +74,11 @@ curl -s http://127.0.0.1:8787/healthz                                    # 本�
 
 `dsh-account` 内置下载页，链接固定为 `https://dsh.hbzxht.com/download`（PC 端「移动端」面板的二维码就指向它）。
 
-安装包放宿主机 `/opt/dsh-account/downloads/`（与 `deploy/` 同级；容器内只读挂载为 `/app/apk`），按版本命名：
+安装包放宿主机 `<部署目录>/downloads/`（与 `deploy/` 同级；容器内只读挂载为 `/app/apk`），按版本命名：
 
 ```bash
 # 正式版：dsh-mobile-<version>.apk；测试版：dsh-mobile-<version>-test.apk
-scp dist/dsh-mobile-<version>.apk root@<生产服务器IP>:/opt/dsh-account/downloads/
+scp dist/dsh-mobile-<version>.apk root@<生产服务器IP>:<部署目录>/downloads/
 ```
 
 - `/download`：手机友好的下载页，自动选**版本号最大**的正式版（没有正式版才用测试版）。
@@ -90,7 +90,7 @@ scp dist/dsh-mobile-<version>.apk root@<生产服务器IP>:/opt/dsh-account/down
 ## 回滚
 
 ```bash
-cd /opt/dsh-account/deploy && docker compose down
+cd <部署目录>/deploy && docker compose down
 rm -f /etc/nginx/conf.d/dsh.hbzxht.com.conf
 /usr/local/nginx/sbin/nginx -t && /usr/local/nginx/sbin/nginx -s reload
 # 如需恢复 nginx：tar xzf /root/nginx-BACKUP-<TS>.tar.gz -C /
