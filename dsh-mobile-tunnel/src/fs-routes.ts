@@ -14,8 +14,13 @@ import { extname, isAbsolute, join, resolve, sep } from 'node:path';
  * - `GET /plugins/dsh-mobile-tunnel/fs?path=<abs>`      列目录（必须在工作区内）
  * - `GET /plugins/dsh-mobile-tunnel/fs-file?path=<abs>` 读文件（必须在工作区内）
  *
- * 工作区判定：`~/.dsh/storages/workspace.json` 的 `tables.workspaces[*].path/sessionIds`；
- * 未传 session 时取最近写入的会话（~/.dsh/sessions/<workspace>/session-<id>/ 的最新 mtime）。
+ * 工作区判定：`~/.dsh/storages/workspace.json` 的 `tables.workspaces[*].path/sessionIds`，
+ * 并用 `~/.dsh/sessions/<workspace>/session-<id>/` 目录名做权威校验；
+ * 未传 session 时取最近写入的会话。
+ *
+ * 显式传了 session 但对不上任何工作区时**不再静默回落默认工作区**（那样客户端一旦给错
+ * 会话 id 就会永远打开同一个错误目录），改为 404 `session-not-found`，由客户端决定是否
+ * 去掉 session 重试。
  */
 
 export const FS_ROOTS_ROUTE = '/plugins/dsh-mobile-tunnel/fs-roots';
@@ -43,6 +48,12 @@ interface WorkspaceScope {
   path: string;
   title: string;
   sessionId: string;
+}
+
+/** 工作区解析结果：`scope` 为空时用 `sessionUnknown` 区分「会话未知」与「没有工作区」。 */
+interface ScopeLookup {
+  scope: WorkspaceScope | null;
+  sessionUnknown: boolean;
 }
 
 function sendJson(res: ServerResponse, status: number, value: unknown): void {
@@ -117,28 +128,91 @@ async function latestSessionId(): Promise<string> {
   return best.id;
 }
 
-/**
- * 解析当前工作区：优先用调用方给的 session，其次最近写入的会话。
- * @param sessionId - 可选会话 id（可带 `session-` 前缀）。
- */
-export async function resolveWorkspaceScope(sessionId?: string): Promise<WorkspaceScope | null> {
-  const wanted = textOf(sessionId).replace(/^session-/, '');
-  const fallback = wanted || (await latestSessionId());
-  const workspaces = await loadWorkspaces();
-  for (const [id, record] of workspaces) {
-    const ids = (record.sessionIds ?? []).map((value) => value.replace(/^session-/, ''));
-    if (fallback && ids.includes(fallback)) {
-      return { path: record.path, title: record.title || record.path, sessionId: fallback };
-    }
-    void id;
-  }
-  // 会话没登记进任何工作区时，退化为默认工作区
+function stripSessionPrefix(value: string): string {
+  return value.replace(/^session-/, '');
+}
+
+/** 会话目录名里的工作区编码：`G:\zxht-git\other\dsh-app` → `--G-zxht-git-other-dsh-app--`。 */
+function encodeWorkspaceDir(path: string): string {
+  return '--' + path.replace(/[\\/:]+/g, '-').replace(/[^A-Za-z0-9._-]+/g, '-') + '--';
+}
+
+function scopeOf(record: WorkspaceRecord, sessionId: string): WorkspaceScope {
+  return { path: record.path, title: record.title || record.path, sessionId };
+}
+
+function defaultWorkspace(workspaces: Map<string, WorkspaceRecord>): WorkspaceRecord | null {
   for (const record of workspaces.values()) {
-    if (record.title === 'default-workspace') {
-      return { path: record.path, title: record.title, sessionId: fallback };
+    if (record.title === 'default-workspace') return record;
+  }
+  return null;
+}
+
+/**
+ * 用 `~/.dsh/sessions/<dir>/session-<id>` 反查工作区。
+ *
+ * 目录名由 DSH 按工作区路径编码而来，比 workspace.json 里的 `sessionIds` 更贴近事实
+ * （会话迁移、记录过期都不会影响它），所以优先采信。
+ */
+async function workspaceFromSessionDir(
+  sessionId: string,
+  workspaces: Map<string, WorkspaceRecord>,
+): Promise<WorkspaceRecord | null> {
+  if (!sessionId) return null;
+  let dirs: string[] = [];
+  try {
+    dirs = (await readdir(SESSIONS_DIR, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch {
+    return null;
+  }
+  const wanted = 'session-' + sessionId;
+  for (const dir of dirs) {
+    let sessions: string[] = [];
+    try {
+      sessions = await readdir(join(SESSIONS_DIR, dir));
+    } catch {
+      continue;
+    }
+    if (!sessions.includes(wanted)) continue;
+    for (const record of workspaces.values()) {
+      if (encodeWorkspaceDir(record.path).toLowerCase() === dir.toLowerCase()) return record;
     }
   }
   return null;
+}
+
+/**
+ * 解析当前工作区。
+ *
+ * - 未传 session：取最近写入的会话，找不到再退默认工作区；
+ * - 传了 session：会话目录 → workspace.json 的 `sessionIds`，都没有则 `sessionUnknown`，
+ *   由调用方返回 404（**不再静默回落默认工作区**，否则错会话会永远打开同一个错目录）。
+ *
+ * @param sessionId - 可选会话 id（可带 `session-` 前缀）。
+ */
+export async function resolveWorkspaceScope(sessionId?: string): Promise<ScopeLookup> {
+  const wanted = stripSessionPrefix(textOf(sessionId));
+  const workspaces = await loadWorkspaces();
+  if (wanted) {
+    const record = await workspaceFromSessionDir(wanted, workspaces);
+    if (record) return { scope: scopeOf(record, wanted), sessionUnknown: false };
+    for (const candidate of workspaces.values()) {
+      const ids = (candidate.sessionIds ?? []).map(stripSessionPrefix);
+      if (ids.includes(wanted)) return { scope: scopeOf(candidate, wanted), sessionUnknown: false };
+    }
+    return { scope: null, sessionUnknown: true };
+  }
+  const latest = await latestSessionId();
+  const latestRecord = await workspaceFromSessionDir(latest, workspaces);
+  if (latestRecord) return { scope: scopeOf(latestRecord, latest), sessionUnknown: false };
+  for (const record of workspaces.values()) {
+    const ids = (record.sessionIds ?? []).map(stripSessionPrefix);
+    if (latest && ids.includes(latest)) return { scope: scopeOf(record, latest), sessionUnknown: false };
+  }
+  const fallback = defaultWorkspace(workspaces);
+  return { scope: fallback ? scopeOf(fallback, latest) : null, sessionUnknown: false };
 }
 
 function within(root: string, target: string): boolean {
@@ -173,25 +247,26 @@ async function listDirectory(path: string): Promise<Entry[]> {
 
 export async function handleFsRoots(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://localhost');
-  const scope = await resolveWorkspaceScope(textOf(url.searchParams.get('session')));
-  if (!scope) {
-    sendJson(res, 404, { error: 'no-workspace' });
+  const lookup = await resolveWorkspaceScope(textOf(url.searchParams.get('session')));
+  if (!lookup.scope) {
+    sendJson(res, 404, { error: lookup.sessionUnknown ? 'session-not-found' : 'no-workspace' });
     return;
   }
   sendJson(res, 200, {
-    sessionId: scope.sessionId,
-    roots: [{ label: scope.title, path: scope.path }],
+    sessionId: lookup.scope.sessionId,
+    roots: [{ label: lookup.scope.title, path: lookup.scope.path }],
   });
 }
 
 export async function handleFsList(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://localhost');
   const target = textOf(url.searchParams.get('path'));
-  const scope = await resolveWorkspaceScope(textOf(url.searchParams.get('session')));
-  if (!scope) {
-    sendJson(res, 404, { error: 'no-workspace' });
+  const lookup = await resolveWorkspaceScope(textOf(url.searchParams.get('session')));
+  if (!lookup.scope) {
+    sendJson(res, 404, { error: lookup.sessionUnknown ? 'session-not-found' : 'no-workspace' });
     return;
   }
+  const scope = lookup.scope;
   if (!target || !isAbsolute(target)) {
     sendJson(res, 400, { error: 'path-not-absolute', path: target });
     return;
@@ -217,11 +292,12 @@ export async function handleFsFile(req: IncomingMessage, res: ServerResponse): P
   const url = new URL(req.url ?? '/', 'http://localhost');
   const raw = textOf(url.searchParams.get('path'));
   const mode = textOf(url.searchParams.get('mode')) || 'auto';
-  const scope = await resolveWorkspaceScope(textOf(url.searchParams.get('session')));
-  if (!scope) {
-    sendJson(res, 404, { error: 'no-workspace' });
+  const scopeLookup = await resolveWorkspaceScope(textOf(url.searchParams.get('session')));
+  if (!scopeLookup.scope) {
+    sendJson(res, 404, { error: scopeLookup.sessionUnknown ? 'session-not-found' : 'no-workspace' });
     return;
   }
+  const scope = scopeLookup.scope;
   if (!raw || !isAbsolute(raw)) {
     sendJson(res, 400, { error: 'path-invalid', path: raw });
     return;
