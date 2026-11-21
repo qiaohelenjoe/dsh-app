@@ -103,6 +103,7 @@ async function fpJson<T>(path: string): Promise<T> {
   const prefix = /^\/t\/[^/]+/.exec(location.pathname);
   if (prefix) push(location.origin + prefix[0] + path);
   const failures: string[] = [];
+  let failure: FpHttpError | null = null;
   for (const url of candidates) {
     const controller = new AbortController();
     const guard = window.setTimeout(() => controller.abort(), 10000);
@@ -114,6 +115,17 @@ async function fpJson<T>(path: string): Promise<T> {
       });
       if (!response.ok) {
         failures.push(url + ' → HTTP ' + response.status);
+        let code = '';
+        try {
+          const body = (await response.json()) as { error?: unknown };
+          if (typeof body?.error === 'string') code = body.error;
+        } catch {
+          // 非 JSON 错误体
+        }
+        // 保留最先拿到的业务错误码（同一个路径的候选前缀会重复报同样的错）
+        if (!failure || (!failure.code && code)) {
+          failure = new FpHttpError(url + ' → HTTP ' + response.status, response.status, code);
+        }
         continue;
       }
       return (await response.json()) as T;
@@ -123,13 +135,33 @@ async function fpJson<T>(path: string): Promise<T> {
       window.clearTimeout(guard);
     }
   }
+  if (failure) {
+    failure.message = failures.join(' | ') || failure.message;
+    throw failure;
+  }
   throw new Error(failures.join(' | '));
 }
 
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
-/** 从 localStorage 猜当前会话 id（宿主用它定位工作区）。 */
-function currentSessionId(): string {
+/** 宿主返回的非 2xx：带上状态码与 `{ error }` 里的错误码，供调用方决定是否重试。 */
+class FpHttpError extends Error {
+  readonly status: number;
+  readonly code: string;
+
+  constructor(message: string, status: number, code: string) {
+    super(message);
+    this.name = 'FpHttpError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
+/** 由 client.ts 注入：从 DSH 客户端服务取当前主视图会话 id。 */
+let sessionSource: (() => string) | null = null;
+
+/** 旧兜底：从 localStorage 猜会话 id（键名含 session 的第一段 UUID，可能与当前会话无关）。 */
+function guessedSessionId(): string {
   try {
     for (let index = 0; index < localStorage.length; index += 1) {
       const key = localStorage.key(index) ?? '';
@@ -142,6 +174,17 @@ function currentSessionId(): string {
     // 忽略
   }
   return '';
+}
+
+/** 当前会话 id：优先 DSH 的主视图会话，取不到才退回 localStorage 猜测。 */
+function currentSessionId(): string {
+  try {
+    const value = sessionSource?.() ?? '';
+    if (UUID_RE.test(value)) return value;
+  } catch {
+    // 忽略
+  }
+  return guessedSessionId();
 }
 
 function withSession(path: string): string {
@@ -453,7 +496,8 @@ export interface FilePanelHandle {
 }
 
 /** 挂载移动端文件入口（悬浮按钮 / 桌面快捷键）。 */
-export function mountFilePanel(): FilePanelHandle {
+export function mountFilePanel(resolveSession?: () => string): FilePanelHandle {
+  sessionSource = resolveSession ?? null;
   let overlay: HTMLElement | null = null;
   let closePanel = (): void => undefined;
   const disposed = { value: false };
@@ -703,15 +747,25 @@ export function mountFilePanel(): FilePanelHandle {
 
     const openWorkspace = async (): Promise<void> => {
       message('加载中…');
+      fpReport('workspace session: ' + (currentSessionId() || 'latest'));
       try {
-        const data = await fpJson<{ roots?: Array<{ label: string; path: string }> }>(
-          withSession(ROOTS_ROUTE),
-        );
+        let data: { roots?: Array<{ label: string; path: string }> };
+        try {
+          data = await fpJson<{ roots?: Array<{ label: string; path: string }> }>(
+            withSession(ROOTS_ROUTE),
+          );
+        } catch (error) {
+          // 会话 id 宿主不认识（旧猜测取错了 / 会话已归档）：退回“最近会话”再取一次
+          if (!(error instanceof FpHttpError) || error.code !== 'session-not-found') throw error;
+          fpReport('session-not-found, retry without session');
+          data = await fpJson<{ roots?: Array<{ label: string; path: string }> }>(ROOTS_ROUTE);
+        }
         const root = (data.roots ?? [])[0];
         if (!root || !root.path) {
           message('没有找到当前会话的工作区');
           return;
         }
+        fpReport('workspace root: ' + root.path);
         state.root = root.path;
         state.tree = await loadChildren(root.path, 0);
         state.tabs = [{ key: 'tree', label: '文件', path: root.path, kind: 'tree' }];
@@ -826,6 +880,7 @@ function replaceOfficialEntry(open: () => void): void {
     close: (): void => closePanel(),
     dispose: (): void => {
       disposed.value = true;
+      sessionSource = null;
       document.removeEventListener('click', onGuideClick, true);
       window.clearInterval(hideTimer);
       closePanel();

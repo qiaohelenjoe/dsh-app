@@ -99,10 +99,15 @@ pnpm install
 数据来源是插件自己在 DSH 本机 Web 服务上注册的只读接口：
 
 ```
-GET /plugins/dsh-mobile-tunnel/fs-roots       当前会话工作区
+GET /plugins/dsh-mobile-tunnel/fs-roots[?session=<会话 id>]   当前会话工作区
 GET /plugins/dsh-mobile-tunnel/fs?path=<绝对路径>   列目录（越界 403）
 GET /plugins/dsh-mobile-tunnel/fs-file?path=<绝对路径>  读文件
 ```
+
+会话 id 由客户端从 DSH 客户端服务 `uiSession` 的当前主视图会话取得（取不到才退回 localStorage 猜测）。
+显式传了会话但对不上任何工作区时返回 `404 {"error":"session-not-found"}`，客户端会去掉 session
+重试一次（退回“最近会话”）；工作区优先按 `~/.dsh/sessions/--<编码路径>--/session-<id>` 目录校验，
+再退 `~/.dsh/storages/workspace.json` 的 `sessionIds`。
 
 排错：客户端会把关键步骤自报到宿主日志 `~/.dsh/dsh-mobile-tunnel-diag.log`
 （`POST /plugins/dsh-mobile-tunnel/diag`），日志里带面板版本号。

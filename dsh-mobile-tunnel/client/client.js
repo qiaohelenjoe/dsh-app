@@ -25,7 +25,7 @@ window.__ModuleLoader__.load({
 		const HIDDEN_FLAG = 'data-dshmf-hidden';
 		const PANEL_ID = 'dsh-mobile-files-panel';
 		const STYLE_ID = 'dsh-mobile-files-style';
-		const PANEL_VERSION = '1.1.9';
+		const PANEL_VERSION = '1.1.10';
 		const BASE = '/plugins/dsh-mobile-tunnel';
 		const DIAG_ROUTE = BASE + '/diag';
 		const ROOTS_ROUTE = BASE + '/fs-roots';
@@ -83,6 +83,7 @@ window.__ModuleLoader__.load({
 		    if (prefix)
 		        push(location.origin + prefix[0] + path);
 		    const failures = [];
+		    let failure = null;
 		    for (const url of candidates) {
 		        const controller = new AbortController();
 		        const guard = window.setTimeout(() => controller.abort(), 10000);
@@ -94,6 +95,19 @@ window.__ModuleLoader__.load({
 		            });
 		            if (!response.ok) {
 		                failures.push(url + ' → HTTP ' + response.status);
+		                let code = '';
+		                try {
+		                    const body = (await response.json());
+		                    if (typeof body?.error === 'string')
+		                        code = body.error;
+		                }
+		                catch {
+		                    // 非 JSON 错误体
+		                }
+		                // 保留最先拿到的业务错误码（同一个路径的候选前缀会重复报同样的错）
+		                if (!failure || (!failure.code && code)) {
+		                    failure = new FpHttpError(url + ' → HTTP ' + response.status, response.status, code);
+		                }
 		                continue;
 		            }
 		            return (await response.json());
@@ -105,11 +119,26 @@ window.__ModuleLoader__.load({
 		            window.clearTimeout(guard);
 		        }
 		    }
+		    if (failure) {
+		        failure.message = failures.join(' | ') || failure.message;
+		        throw failure;
+		    }
 		    throw new Error(failures.join(' | '));
 		}
 		const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
-		/** 从 localStorage 猜当前会话 id（宿主用它定位工作区）。 */
-		function currentSessionId() {
+		/** 宿主返回的非 2xx：带上状态码与 `{ error }` 里的错误码，供调用方决定是否重试。 */
+		class FpHttpError extends Error {
+		    constructor(message, status, code) {
+		        super(message);
+		        this.name = 'FpHttpError';
+		        this.status = status;
+		        this.code = code;
+		    }
+		}
+		/** 由 client.ts 注入：从 DSH 客户端服务取当前主视图会话 id。 */
+		let sessionSource = null;
+		/** 旧兜底：从 localStorage 猜会话 id（键名含 session 的第一段 UUID，可能与当前会话无关）。 */
+		function guessedSessionId() {
 		    try {
 		        for (let index = 0; index < localStorage.length; index += 1) {
 		            const key = localStorage.key(index) ?? '';
@@ -125,6 +154,18 @@ window.__ModuleLoader__.load({
 		        // 忽略
 		    }
 		    return '';
+		}
+		/** 当前会话 id：优先 DSH 的主视图会话，取不到才退回 localStorage 猜测。 */
+		function currentSessionId() {
+		    try {
+		        const value = sessionSource?.() ?? '';
+		        if (UUID_RE.test(value))
+		            return value;
+		    }
+		    catch {
+		        // 忽略
+		    }
+		    return guessedSessionId();
 		}
 		function withSession(path) {
 		    const session = currentSessionId();
@@ -440,7 +481,8 @@ window.__ModuleLoader__.load({
 		    document.head.appendChild(style);
 		}
 		/** 挂载移动端文件入口（悬浮按钮 / 桌面快捷键）。 */
-		function mountFilePanel() {
+		function mountFilePanel(resolveSession) {
+		    sessionSource = resolveSession ?? null;
 		    let overlay = null;
 		    let closePanel = () => undefined;
 		    const disposed = { value: false };
@@ -689,13 +731,25 @@ window.__ModuleLoader__.load({
 		        };
 		        const openWorkspace = async () => {
 		            message('加载中…');
+		            fpReport('workspace session: ' + (currentSessionId() || 'latest'));
 		            try {
-		                const data = await fpJson(withSession(ROOTS_ROUTE));
+		                let data;
+		                try {
+		                    data = await fpJson(withSession(ROOTS_ROUTE));
+		                }
+		                catch (error) {
+		                    // 会话 id 宿主不认识（旧猜测取错了 / 会话已归档）：退回“最近会话”再取一次
+		                    if (!(error instanceof FpHttpError) || error.code !== 'session-not-found')
+		                        throw error;
+		                    fpReport('session-not-found, retry without session');
+		                    data = await fpJson(ROOTS_ROUTE);
+		                }
 		                const root = (data.roots ?? [])[0];
 		                if (!root || !root.path) {
 		                    message('没有找到当前会话的工作区');
 		                    return;
 		                }
+		                fpReport('workspace root: ' + root.path);
 		                state.root = root.path;
 		                state.tree = await loadChildren(root.path, 0);
 		                state.tabs = [{ key: 'tree', label: '文件', path: root.path, kind: 'tree' }];
@@ -811,6 +865,7 @@ window.__ModuleLoader__.load({
 		        close: () => closePanel(),
 		        dispose: () => {
 		            disposed.value = true;
+		            sessionSource = null;
 		            document.removeEventListener('click', onGuideClick, true);
 		            window.clearInterval(hideTimer);
 		            closePanel();
@@ -2144,6 +2199,22 @@ window.__ModuleLoader__.load({
 		    }
 		    applyLogoPolicy();
 		}
+		/**
+		 * DSH 主视图当前会话 id（官方「工作区文件」面板就是按这个会话绑定工作区）。
+		 *
+		 * 以前客户端是扫 localStorage 猜 UUID，猜错时宿主会回落默认工作区，导致面板永远打开
+		 * 同一个错误目录；这里改为向客户端服务要真值，取不到才让文件面板退回旧猜法。
+		 */
+		function currentHostSessionId(ctx) {
+		    try {
+		        const uiSession = ctx?.get?.('uiSession');
+		        const key = uiSession?.current?.value?.key;
+		        return typeof key === 'string' ? key : '';
+		    }
+		    catch {
+		        return '';
+		    }
+		}
 		/** Cordis 客户端插件入口。 */
 		function apply(ctx) {
 		    if (typeof document === 'undefined')
@@ -2154,7 +2225,7 @@ window.__ModuleLoader__.load({
 		    if (document.getElementById(NAV_ENTRY_ID))
 		        return disposeFileProvider;
 		    // 移动端：用自己的文件面板替换官方「工作区文件」入口（官方预览依赖缺失的 resources 服务）。
-		    const filePanel = filePanelEnabled() ? mountFilePanel() : null;
+		    const filePanel = filePanelEnabled() ? mountFilePanel(() => currentHostSessionId(ctx)) : null;
 		    console.log('[mobile-menu] mobile=' + isMobileApp() + ' flag=' + document.documentElement?.getAttribute('data-dsh-mobile-app') + ' ua=' + navigator.userAgent.slice(0, 70));
 		    const retryLogo = () => {
 		        applyLogoPolicy();

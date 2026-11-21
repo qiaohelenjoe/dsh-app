@@ -91,6 +91,7 @@ cd deploy && cp .env.example .env && docker compose up -d --build
 
 - 入口：右侧面板 Guide 的「工作区文件」行被插件**原样克隆替换**（文字/样式不变，只换点击行为）；仅移动端，桌面端不挂载、不插任何节点，也**没有悬浮按钮**
 - 数据：宿主只读 HTTP `GET /plugins/dsh-mobile-tunnel/fs-roots | fs?path= | fs-file?path=`，工作区由 `~/.dsh/storages/workspace.json` + 最近活跃会话反查，越界返回 403；客户端 `fetch` 直读
+- **会话来源**：客户端从 DSH 客户端服务 `uiSession` 的当前主视图会话取 session id（取不到才退回 localStorage 猜测）；显式会话对不上工作区时宿主返回 `404 session-not-found`，客户端去掉 session 重试——不要再让宿主静默回落 `default-workspace`（那会导致错会话永远打开同一个错误目录）
 - **不要**改回 `ctx.resources` / `remote.workspaceFiles`：客户端插件声明该服务会让整个插件延迟启动（连带移动端 UI 修正停摆），`ctx.inject([...])` 反应式注入也会被 Cordis 拒绝
 - 预览能力：Markdown 渲染、JSON 美化、代码高亮+行号、图片点击放大；黑名单只挡可执行/压缩包/媒体等二进制
 - 排错：`POST /plugins/dsh-mobile-tunnel/diag` 追加写 `~/.dsh/dsh-mobile-tunnel-diag.log`，客户端自报日志（版本号、入口替换、关闭、目录加载等）

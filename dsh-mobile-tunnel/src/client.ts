@@ -1362,6 +1362,26 @@ function applyMobileMenuPolicy(): void {
 
 }
 
+interface UiSessionFace {
+  current?: { value?: { key?: unknown } };
+}
+
+/**
+ * DSH 主视图当前会话 id（官方「工作区文件」面板就是按这个会话绑定工作区）。
+ *
+ * 以前客户端是扫 localStorage 猜 UUID，猜错时宿主会回落默认工作区，导致面板永远打开
+ * 同一个错误目录；这里改为向客户端服务要真值，取不到才让文件面板退回旧猜法。
+ */
+function currentHostSessionId(ctx?: ClientContext): string {
+  try {
+    const uiSession = ctx?.get?.('uiSession') as UiSessionFace | undefined;
+    const key = uiSession?.current?.value?.key;
+    return typeof key === 'string' ? key : '';
+  } catch {
+    return '';
+  }
+}
+
 /** Cordis 客户端插件入口。 */
 function apply(ctx?: ClientContext): () => void {
   if (typeof document === 'undefined') return () => undefined;
@@ -1370,7 +1390,7 @@ function apply(ctx?: ClientContext): () => void {
   installStyle();
   if (document.getElementById(NAV_ENTRY_ID)) return disposeFileProvider;
   // 移动端：用自己的文件面板替换官方「工作区文件」入口（官方预览依赖缺失的 resources 服务）。
-  const filePanel = filePanelEnabled() ? mountFilePanel() : null;
+  const filePanel = filePanelEnabled() ? mountFilePanel(() => currentHostSessionId(ctx)) : null;
 
   console.log('[mobile-menu] mobile=' + isMobileApp() + ' flag=' + document.documentElement?.getAttribute('data-dsh-mobile-app') + ' ua=' + navigator.userAgent.slice(0, 70));
 
